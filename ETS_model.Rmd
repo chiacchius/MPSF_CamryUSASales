@@ -1,0 +1,1121 @@
+---
+title: "Toyota Camry sales Time Series analysis and forecast using ETS model"
+output: html_notebook
+---
+###### Author: Matteo Chiacchia
+###### Prof. Roberto Monte
+
+## Modello ETS
+
+L'*Esponential Smoothing* è una tecnica basata su regole empiriche per lisciare i dati di una serie storica utilizzando la *exponential window function*. A differenza della media mobile semplice in cui le osservazioni passate sono ponderate in modo uguale, le funzioni esponenziali vengono utilizzate per assegnare pesi decrescenti in modo esponenziale nel tempo.  In altri termini, più un’osservazione è recente, più è alto il peso associato all’osservazione in termini predittivi. Questa tecnica produce previsioni affidabili in maniera rapida e per un’ampia varietà di serie storiche.
+
+Per i modelli ETS, il criterio di informazione di *Akaike (AIC)* è definito come $AIC=2k−2log(L)$, dove *L* è la funzione di versoimiglianza del modello e *k* è il numero totale di parametri e di stati iniziali che devono essere stimati (compresa la varianza dei residui).
+
+L’*AIC* corretto per la distorsione in piccoli campioni (AICc) è definito come $AIC_c=AIC+2k(k+1)/(T−k−1)$ ,ed il criterio di informazione bayesiano (B*ayesian Information Criterion, BIC*) è $BIC=k*log(T)−2log(L)$
+
+Il criterio di informazione di Akaike (AIC) è un metodo per confrontare modelli alternativi e scegliere il migliore in base alla sua capacità di adattarsi ai dati e alla complessità del modello. L'AIC tiene conto sia della bontà di adattamento del modello ai dati, misurata dalla funzione di verosimiglianza L, che della sua complessità, misurata dal numero di parametri stimati k. Il modello con il valore più basso di AIC è considerato il migliore.
+
+L'AIC corretto per la distorsione in piccoli campioni (AICc) tiene conto anche della dimensione del campione e aggiunge un termine di correzione per i campioni più piccoli, per evitare di selezionare modelli troppo complessi. Il termine di correzione dipende dal numero di parametri stimati k e dal numero di osservazioni T.
+
+Il criterio di informazione bayesiano (BIC) è simile all'AIC, ma utilizza un approccio bayesiano alla selezione del modello. Il BIC tiene conto anche della dimensione del campione T e penalizza i modelli più complessi, utilizzando un termine logaritmico che cresce con il numero di osservazioni.
+
+In sintesi, tutti e tre i criteri di informazione (AIC, AICc e BIC) sono utilizzati per confrontare modelli alternativi e scegliere quello che migliore si adatta ai dati storici, con l'obiettivo di fare previsioni accurate per il futuro.
+
+Nella seguente analisi verrà utilizzato un modello di tipo *(A,A,A)* in cui la prima lettera indica il tipo di errore; la seconda lettera indica il tipo di tendenza; e la terza lettera indica il tipo di stagionalità. In tutti i casi viene utilizzata la *A*, ovvero tutti i tipi sono *additivi*.
+
+## Time series analysis and forecast with ETS
+
+Lo svolgimento dello studio effettuato è classificabile in due macro categorie:
+
+- ***Analisi***: scomposizione della serie storica nelle sue componenti (*Error*,*Trend*,*Seasonality*). Utilizzo del modello *ARMA* (*Autoregressive–moving-average model*) per la descrizione della parte stazionaria (*Error*).
+
+- ***Previsione***: forecast della parte di *trend-seasonality* tramite la funzione *R* unito additivamente al forecast dell'*error* tramite modello *ARMA* .
+
+### 1. Analisi
+
+Il primo passaggio è caricare le librerie di riferimento 
+```{r}
+library(base)
+library(stats)
+library(astsa)
+library(tibble)
+library(dplyr)
+library(readxl)
+library(numbers)
+library(ggplot2)
+library(EnvStats)
+library(DescTools)
+library(lattice)
+library(leaps)
+library(ltsa)
+library(bestglm)
+library(zoo)
+library(lmtest)
+library(forecast)
+library(gridExtra)
+library(grid)
+library(gtable)
+library(tsibble)
+library(fabletools)
+library(fable)
+library(feasts)
+library(crayon)
+library(fBasics)
+library(nortest)
+library(tseries)
+library(survival)
+library(MASS)
+library(fitdistrplus)
+library(glogis)
+library(car)
+library(pracma)
+library(NlcOptim)
+library(goftest)
+library(qqplotr)
+library(BiocManager)
+library(stats4)
+library(dynamicTreeCut)
+library(fastcluster)
+library(xts)
+library(TTR)
+library(quantmod)
+library(urca)
+library(fpp3)
+```
+```{r}
+graphics.off()
+# Removes all items in Environment!
+rm(list=ls())
+# To reset options to default values
+def_options <- options()
+# Sets the data directory.
+WD <- dirname(rstudioapi::getSourceEditorContext()$path)
+show(WD)
+setwd(WD)
+dir()
+# To clear the console
+cat("\014")
+# Functions
+nextodd <- function(x){
+  x <- round(x)
+  if(x%%2==0) x <- x+1
+  as.integer(x)
+}
+```
+Si caricano i *file* contententi *dataframe* e *trainset* già modificato, in quanto i passaggi relativi alle varie trasformazioni di *Box-Cox* sono i medesimi del caso *STL*.
+Analogamente al caso precedente, infatti, si è deciso di utlizzare i dati a partire da *Gennaio 2009* anche se i primi dati risalgono all'anno *2005* (per i medesimi motivi) e di eliminare l'ultimo valore (*Dicembre 2022*) in quanto nullo.
+```{r}
+Camry_TrnS_df <- read.csv("Camry_US_sales_trainset.csv")
+#df_tst_Camry_US_sales <- read.csv("Camry_US_sales_testset.csv")
+df_Camry_US_sales <- read_excel("Camry_US_sales.xlsx")
+df_Camry_US_sales <- df_Camry_US_sales[-nrow(df_Camry_US_sales), ]
+#time series start = 01/2009
+df_Camry_US_sales <- df_Camry_US_sales[df_Camry_US_sales$date >= "2009-01-31", ]
+DS_length <- nrow(df_Camry_US_sales)
+df <- data.frame(Year=year(df_Camry_US_sales$date), Month=month(df_Camry_US_sales$date), date=df_Camry_US_sales$date,
+                 sales=as.vector(df_Camry_US_sales$sales))
+
+df_Camry <- add_column(add_column(df, t=1:nrow(df), .before="Year"))
+Data_df <- Camry_TrnS_df
+Data_df <- dplyr::rename(Data_df, x=t, y=y_BCT_log)
+TrnS_length <- nrow(Camry_TrnS_df)
+TstS_length <- DS_length-TrnS_length
+```
+Si visualizza il *Line plot* del dataframe con la trasformazione logaritmica
+```{r}
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[TrnS_length],Data_df$Year[TrnS_length])
+title_content <- bquote(atop("MPSMF",
+                             paste("Line Plot of Logaritmic Transformations of Monthly Toyota Camry Sales from ", .(First_Date), " to ", .(Last_Date))))
+caption_content <- "Author: Matteo Chiacchia"
+subtitle_content <- bquote(paste("Sales log - Data set size ", .(TrnS_length),~~"sample points"))
+
+x_name <- bquote("Years")
+x_breaks_num <- 16
+x_breaks_low <- Data_df$x[1]
+x_breaks_up <- Data_df$x[TrnS_length]
+x_binwidth <- ceiling((x_breaks_up-x_breaks_low)/x_breaks_num)
+x_breaks <- c(x_breaks_low,seq(from=x_binwidth, to=x_breaks_up, by=x_binwidth))
+# x_labs <- format(x_breaks, scientific=FALSE)
+x_labs <- as.character(Data_df$Year[x_breaks])
+J <- 0
+x_lims <- c(x_breaks_low-J*x_binwidth,x_breaks_up+J*x_binwidth)
+y_name <- bquote("Sales")
+y_breaks_num <- 10
+y_binwidth <- round((max(Data_df$y)-min(Data_df$y))/y_breaks_num, digits=3)
+y_breaks_low <- floor((min(Data_df$y)/y_binwidth))*y_binwidth
+y_breaks_up <- ceiling((max(Data_df$y)/y_binwidth))*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+col_1 <- bquote("Sales")
+col_2 <- bquote("LOESS curve")
+col_3 <- bquote("regression line")
+leg_labs <- c(col_1, col_2, col_3)
+leg_cols <- c("col_1"="blue", "col_2"="red", "col_3"="green3")
+leg_sort <- c("col_1", "col_2", "col_3")
+trnst_plt <- ggplot(Data_df) +
+  geom_smooth(alpha=1, size = 0.5, linetype="solid", aes(x=x, y=y, color="col_3"),
+              method = "lm" , formula = y ~ x, se=FALSE, fullrange=TRUE) +
+  geom_smooth(alpha=1, size = 0.5, linetype="dashed", aes(x=x, y=y, color="col_2"),
+              method = "loess", formula = y ~ x, se=FALSE) +
+  geom_line(alpha=1, linewidth=0.5, linetype="solid", aes(x=x, y=y, color="col_1")) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, label=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis = sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  scale_colour_manual(name="Legend", labels=leg_labs, values=leg_cols, breaks=leg_sort,
+                      guide=guide_legend(override.aes=list(shape=c(19,NA,NA), 
+                                                           linetype=c("blank", "dashed", "solid")))) +
+  theme(plot.title=element_text(hjust=0.5), plot.subtitle=element_text(hjust=0.5),
+        axis.text.x = element_text(angle=0, vjust=1),
+        legend.key.width = unit(0.8,"cm"), legend.position="bottom")
+plot(trnst_plt)
+```
+#### ETS Model
+
+Tratteremo ora le componenti del dataset di partenza attraverso un modello *ETS* di tipo additivo *(A,A,A)* che stima i parametri in maniera automatica.
+```{r}
+train_ts <- ts(Camry_TrnS_df$y_BCT_log, start=c(2009, 01), end=c(2021, 11), frequency = 12)
+y_BCT_log <- Camry_TrnS_df$y_BCT_log
+train_ts_tsibble <- as_tsibble(train_ts, key = NULL, index = date)
+Data_tsibble <- train_ts_tsibble
+y_log_ETS_AAA <- forecast::ets(train_ts, model = 'AAA', damped = FALSE)
+autoplot(y_log_ETS_AAA)
+y_BCT_log_ETS_rem <- y_log_ETS_AAA[["residuals"]]
+```
+Una volta effettuata la decomposizione *ETS* si passa all'analisi dei residui. L'idea è quella di verificare, in prima fase, se questi siano o meno autocorrelati. 
+
+- In caso *positivo* si cercheranno di verificare anche le altre caratteristi del *white noise*: stazionarietà, omoschedasticità e gaussianità.
+- In caso *negativo* si utilizzerà un modello *ARIMA* per descrivere la struttura di autocorrelazione.
+
+Plot dell'autocorrelogramma:
+```{r}
+# The autocorrelogram of the remainders.
+Data_df <- Camry_TrnS_df
+y <- y_BCT_log_ETS_rem
+#show(y)
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- acf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Autocorrelogram of the Remainders in the ETS Decomp. for the Log. Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=9), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+Plot dell'autocorrelogramma parziale:
+```{r}
+# The partial autocorrelogram of the remainders.
+Data_df <- Camry_TrnS_df
+y <- y_BCT_log_ETS_rem
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- pacf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Partial Autocorrelogram of the Remainders in the ETS Decomp. for the Log. Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=9), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+Come si può notare dagli autocorrelogrammi, il remainder è fortemento autocorrelato. 
+Si utilizza anche il* LB test* per complettezza.
+```{r}
+y <- y_BCT_log_ETS_rem
+maxlag <- ceiling(min(10, T/4))
+Box.test(y, lag = maxlag,type = "Ljung-Box", fitdf = 0)
+```
+Il test confema la prova visiva precedente di correlazione.
+Di conseguenza si cercherà di descrivere questa autocorrelazione tramite un modello *ARMA.*
+
+##### **ARMA model**
+
+I modelli **ARMA** (*Autoregressive Moving Average*) sono una classe di modelli statistici utilizzati per analizzare serie temporali. Questi modelli combinano due componenti principali: l'*autoregressione* (**AR**) e la *media mobile* (**MA**).
+
+Il componente **AR** utilizza i valori precedenti della serie temporale per prevedere i valori futuri. Ciò significa che il valore corrente dipende dalle osservazioni precedenti. Il grado di dipendenza dai valori precedenti dipende dall'ordine del modello AR.
+
+Il componente **MA**, d'altra parte, utilizza l'errore residuo della previsione dell'autoregressione per prevedere i valori futuri. L'ordine del modello MA determina il numero di errori residui utilizzati nella previsione.
+
+L'idea è quella di poter rappresentare il *remainder* tramite un modello **ARMA**.
+Sono stati adottati due diversi approcci in *R* per identificare il miglior modello *ARMA.* Uno si basa su una funzione integrata di *R* ("*auto.arima*"), mentre l'altro si basa sulla selezione manuale del miglior modello *ARMA* tra quelli testati. Entrambi i metodi selezionano il miglior modello tramite il valore più basso di *AIC* ottenuto.
+In statistica, l'*AIC* (*Akaike's Information Criterion*) è una misura di bontà di adattamento di un modello statistico ai dati osservati. Esso fornisce una stima relativa della qualità di un modello rispetto ad altri modelli alternativi.
+
+L'*AIC* è calcolato come la somma del logaritmo della verosimiglianza del modello e del doppio del numero di parametri del modello stesso, quindi:
+
+$AIC =  2k -2 log( L )$
+
+dove *k* è il numero di parametri nel modello statistico e *L* è il valore massimizzato della funzione di verosimiglianza del modello stimato.
+
+L'idea alla base dell'*AIC* è di penalizzare i modelli che includono troppi parametri rispetto al numero di osservazioni, poiché questi modelli rischiano di sovra-adattarsi ai dati di apprendimento e di perdere la capacità di generalizzare ad altri dati (*overfitting*). Pertanto, tra i modelli che forniscono un buon adattamento ai dati, l'*AIC* suggerisce di scegliere quello con il valore minore.
+```{r}
+y <- as.vector(y_BCT_log_ETS_rem)
+ARIMA_y <- list()
+# Setting a counter
+cn <- 1
+# Looping over include.mean
+for(flag in 0:1){
+  # Looping over p
+  for(p in 0:6){
+    # Looping over q
+    for(q in 0:6){
+    #ERROR and WARNINGS HANDLING
+    tryCatch({
+      ARIMA_y[[cn]] <- arima(y, order=c(p,0,q), include.mean=flag, method="CSS-ML")
+      cn <- cn+1
+    }, error = function(e){
+    }, warning = function (w){
+    }
+    )
+  }
+ } 
+}
+# Selecting the best model by the Akaike Information Criterium
+ARIMA_y_AIC <- sapply(ARIMA_y, function(x) x$aic)
+#show(ARIMA_y_AIC)
+ARIMA_y_min_AIC <- ARIMA_y[[which(ARIMA_y_AIC==min(ARIMA_y_AIC))]]
+show(ARIMA_y_min_AIC)
+```
+Tramite la selezione manuale otteniamo che il modello **ARIMA (5,0,6)** è quello che restituisce un valore di AIC minore.
+
+Adesso si studia la correlazione dei residui del modello tramite il test di LB test.
+```{r}
+T <- length(y)
+maxlag <- ceiling(min(10, T/4)) 
+ARIMA_y_min_AIC_LB <- Box.test(ARIMA_y[[which(ARIMA_y_AIC==min(ARIMA_y_AIC))]][["residuals"]], 
+                                   lag=maxlag)
+show(ARIMA_y_min_AIC_LB)
+```
+Il *p-value* resituito (0.9913) ci suggerisce che non è presente correlazione nei residui del modello *ARIMA (5,0,6)*.
+
+Viene utilizzata anche la funzione automatica per verificare quale è il miglior modello adatto a descrivere il *remainder ETS*.
+```{r}
+y <- as.vector(y_BCT_log_ETS_rem)
+AUTOARIMA_y_AIC <- auto.arima(y, start.p=0, max.p=6, start.q=0, max.q=6, max.order=12, ic="aic", 
+                              allowmean=TRUE, trace=TRUE, stepwise=FALSE, nmodels=94, 
+                              approximation=FALSE)
+```
+La funzione automatica resituisce come miglior modello il modello *ARIMA (0,0,6)*.
+
+Per decididere quale modello utilizzare si effettuano i vari test e si verifica, prendendo in considerazione anche la complessità del modello, quale restituisce i valori migliori.
+
+**ARIMA (5,0,6)**
+```{r}
+y <- as.vector(y_BCT_log_ETS_rem)
+num_lags <- 0   # Setting the lag parameter for the test.
+AUTOARIMA_y_AIC <- arima(y, order=c(5,0,6), include.mean=FALSE, method="CSS-ML")
+arima_res=AUTOARIMA_y_AIC[['residuals']]
+# The studentized BP test
+ARIMA_y_AIC_BP <- lmtest::bptest(formula=arima_res~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_BP)
+# The studentized White test
+ARIMA_y_AIC_W <- lmtest::bptest(formula=arima_res~t, varformula=arima_res~t+I(t^2), studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_W)
+# The ADF test
+ARIMA_y_AIC_ADF <- ur.df(AUTOARIMA_y_AIC[['residuals']], type="none", lags=num_lags, selectlags="Fixed")    
+summary(ARIMA_y_AIC_ADF)  
+# The KPSS test
+ARIMA_y_AIC_KPSS <- ur.kpss(AUTOARIMA_y_AIC[['residuals']], type="mu", lags="nil", use.lag=NULL)    
+summary(ARIMA_y_AIC_KPSS)    # Showing the result of the test
+# The LB test
+ARIMA_y_AIC_LB <- Box.test(AUTOARIMA_y_AIC[["residuals"]], lag=maxlag)
+show(ARIMA_y_AIC_LB)
+```
+**ARIMA (0,0,6)**
+```{r}
+AUTOARIMA_y_AIC <- arima(y, order=c(0,0,6), include.mean=FALSE, method="CSS-ML")
+arima_res=AUTOARIMA_y_AIC[['residuals']]
+
+# The studentized BP test
+ARIMA_y_AIC_BP <- lmtest::bptest(formula=arima_res~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_BP)
+
+# The studentized White test
+ARIMA_y_AIC_W <- lmtest::bptest(formula=arima_res~t, varformula=arima_res~t+I(t^2), studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_W)
+
+# The ADF test
+ARIMA_y_AIC_ADF <- ur.df(AUTOARIMA_y_AIC[['residuals']], type="none", lags=num_lags, selectlags="Fixed")    
+summary(ARIMA_y_AIC_ADF)  
+
+# The KPSS test
+ARIMA_y_AIC_KPSS <- ur.kpss(AUTOARIMA_y_AIC[['residuals']], type="mu", lags="nil", use.lag=NULL)    
+summary(ARIMA_y_AIC_KPSS)    # Showing the result of the test
+
+# The LB test
+ARIMA_y_AIC_LB <- Box.test(AUTOARIMA_y_AIC[["residuals"]], lag=maxlag)
+show(ARIMA_y_AIC_LB)
+```
+Riassumento abbiamo i seguenti p-values:
+
+- **ARIMA (5,0,6)**
+  - *Omoschedasticità*
+    - Breusch-Pagan test: 0.9343
+    - White test: 0.08484
+  - *Stazionarietà*
+    - Dickey-Fuller test: < 0.01
+    - Kpss test: > 0.1
+  - *Non correlazione*
+    - Ljung-Box test: 0.9913
+    
+- **ARIMA (0,0,6)**
+  - *Omoschedasticità*
+    - Breusch-Pagan test: 0.7793
+    - White test: > 0.1
+  - *Stazionarietà*
+    - Dickey-Fuller test: < 0.01
+    - Kpss test: 0.1925
+  - *Non correlazione*
+    - Ljung-Box test: 0.9637
+    
+Il p-value elevato per il *BP test* indica l'omoschedasticità dei residui. L'elevato p-value del *LB test* non ci permette di rigettare l'ipotesi nulla di residui generati da rumore bianco. Infine, il p-value basso dell'*ADF test* indica che i residui possono essere considerati stazionari con un livello di confidenza dell'1%, mentre il *KPSS test*, che restiuisce un valore del p-value maggiore di 0.05, indica che l'ipotesi nulla di stazionarietà non è rigettabile.
+
+I modelli hanno valori estremamente simili ma si continuerà l'analisi utilizzando il modello **ARIMA (0,0,6)** essendo quello che resituisce il miglior compromesso tra "semplicità" del modello e valori di *Omoschedasticità* *Stazionarietà* e *non correlazione*.
+Equazione del modello: $X_t=W_t−Θ_1W_{t−1}−Θ_2W_{t−2}−⋯−Θ_6W_{t−6}$
+```{r}
+y <- y_BCT_log_ETS_rem
+AUTOARIMA_y_AIC <- arima(y, order=c(0,0,6), include.mean=FALSE, method="CSS-ML")
+autoplot(ts(fitted(AUTOARIMA_y_AIC) , start=c(2009, 01), end=c(2021, 10), frequency = 12), series= "arima") +
+  autolayer(ts(y_BCT_log_ETS_rem , start=c(2009, 01), end=c(2021, 10), frequency = 12), series="remainder") +
+  xlab("Month") + ylab("rem") +
+  ggtitle("Remainder Toyota Camry") +
+  guides(colour=guide_legend(title="Legend"))
+```
+Per completezza vediamo anche gli autocorrelorammi.
+```{r}
+# The autocorrelogram of the remainders.
+Data_df <- Camry_TrnS_df
+y <- as.vector(y_BCT_log_ETS_rem)
+AUTOARIMA_y_AIC <- arima(y, order=c(0,0,6), include.mean=FALSE, method="CSS-ML")
+Camry_TrnS_df <- add_column(Camry_TrnS_df, ets_residuals=AUTOARIMA_y_AIC[["residuals"]])
+y <- AUTOARIMA_y_AIC[["residuals"]]
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- acf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Autocorrelogram of the Residuals of the ARIMA model for the Remainders in the ETS Decomp. for the Log Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=9), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+
+```
+```{r}
+# The partial autocorrelogram of the remainders.
+Data_df <- Camry_TrnS_df
+y <- AUTOARIMA_y_AIC[["residuals"]]
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- pacf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Partial Autocorrelogram of the Residuals of the ARIMA model for the Remainders in the ETS Decomp. for the Log Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=9), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+Il numero di picchi corrispondenti ai lags positivi che attraversano le linee di confidenza è nullo.
+
+**COVID-19**: La pandemia di *COVID-19* ha causato una serie di cambiamenti nell'economia, nella società e nella vita quotidiana delle persone. Ciò ha comportato una serie di conseguenze che possono influenzare i modelli delle *time series*. Ad esempio, le chiusure forzate delle attività economiche, le interruzioni nella catena di approvvigionamento e le fluttuazioni nei comportamenti di spesa dei consumatori possono influire sui dati che alimentano questi modelli.
+
+Modificare il valore del *noise* di un modello di *time series* può aiutare a tener conto di queste fluttuazioni impreviste e delle incertezze causate dalla pandemia. Ciò può essere particolarmente importante per la previsione della domanda di mercato, per la valutazione delle risorse finanziarie necessarie e per la pianificazione a lungo termine. Tuttavia, la modifica del valore del *noise* deve essere supportata da una solida analisi dei dati e della situazione attuale per garantire che le previsioni siano il più accurate possibile.
+
+Secondo i dati dell'*Associazione Nazionale dei Rivenditori di Auto (NADA)*, le vendite di auto negli Stati Uniti sono diminuite del 14,6% nel 2020 rispetto all'anno precedente, con un totale di circa 14,5 milioni di auto vendute rispetto ai 17 milioni di auto vendute nel 2019.
+
+La pandemia ha avuto un impatto significativo sul settore automobilistico degli *Stati Uniti*, con molte fabbriche e concessionarie che hanno chiuso temporaneamente durante la prima ondata della pandemia. Inoltre, la situazione economica incerta ha portato molti consumatori a posticipare l'acquisto di un'auto o a optare per opzioni di trasporto alternative come il car sharing o il bike sharing.
+
+Tuttavia, le vendite di auto negli Stati Uniti hanno mostrato una ripresa nella seconda metà del 2020.
+
+Per poter trattare meglio, quindi, il *noise* e poter effettivamente affermare di avere un rumore che non dipende da nessuna causa esterna, modifichiamo il valore di picco più basso tramite un'*interpolazione lineare*.
+```{r}
+#Covid value modify
+y <- AUTOARIMA_y_AIC[["residuals"]]
+min_covid <- min(y)
+min_covid_index <- which.min(y)
+y[y == min_covid] <- 0
+new_min_index <- which.min(y)
+y[min_covid_index] <- ((y[min_covid_index+1] -  y[min_covid_index-1]) / 2) +  y[min_covid_index-1]
+y_ETS_arima_residuals_mod <- y
+```
+
+Una volta modificato il valore relativo al crollo delle vendite a causa del COVID-19 si procede con l'analisi dei residui, cercando di verificare quale possa essere la distribuzione generatrice.
+
+Per ottenere informazioni sulla distribuzione che meglio rappresenta i residui del modello ARMA, possiamo considerare il grafico di **Cullen-Frey** della *skewness* e della *kurtosis* dei dati.
+```{r}
+y <- as.vector(y_ETS_arima_residuals_mod)
+descdist(y, discrete=FALSE, method="sample", graph=TRUE, boot=1000)
+```
+Nel grafico il punto blu rappresenta la coppia *skewness-kurtosis* dei dati osservati (cioè la *skewness* e la *kurtosis* dei residui del modello *ARMA*), e i punti arancioni rappresentano le coppie skewness-kurtosis di 1000 campionamenti dei dati osservati ottenuti con il metodo del *bootstrap.* Sul grafico sono riportati con diversi simboli e linee (come spiegato nella legenda) la *skewness* e la *kurtosis* di alcune distribuzioni note come la normale, la gamma, l'uniforme, ecc. I punti di bootstrap sono vicini alla distribuzioni *logistica*. Si effettueranno anche i test di *gaussinaità* e si testerà anche la distribuzione di *Student*, essendo anch'essa una possibile candidata.
+
+Per completezza calcoliamo anche i valori di *skewness* e *kurtosis* con relativi intervalli di confidenza.
+```{r}
+y <- y_ETS_arima_residuals_mod
+y_skew <- DescTools::Skew(y, weights=NULL, na.rm=TRUE, method=2, conf.level=0.90, ci.type="bca", R=1000) 
+show(y_skew)
+```
+```{r}
+y <- y_ETS_arima_residuals_mod
+y_kurt <- DescTools::Kurt(y, weights=NULL, na.rm=TRUE, method=2, conf.level=0.90, ci.type="bca", R=1000) 
+show(y_kurt)
+```
+Si nota un valore di *skewness* che ricade a 0 con un livello di confidenza del 90%. Si suppone quindi una distribuzione simmetrica.
+Inoltre, si nota una *kurtosis* simile a quella di una ditribuzione *logistica* pertanto, come si è specificato precedente dall'analisi del grafico, si cercherà di verificare si i residui possono essere trattati come questo tipo di distribuzione.
+```{r}
+y <- y_ETS_arima_residuals_mod
+# Shapiro-Wilks (SW) test, library(stats)
+y_SW <- shapiro.test(y)
+show(y_SW)
+# Anderson-Darling (AD) test, library(nortest)
+y_AD <- nortest::ad.test(y)
+show(y_AD)
+# D'Agostino Pearson (DP) test, library(fBasics)
+y_DP <- dagoTest(y)
+show(y_DP)
+```
+La serie non passa i test di normalità.
+
+Si passa, quindi, alla stima dei parametri della distribuzione  *Logistica*
+Preliminarmente effettuiamo le seguenti operazioni:
+
+- Standardizziamo i residui ovvero trasformarli in modo che abbiano media zero e deviazione standard pari a uno
+- Calcoliamo i quantili empirici ovvero identifichiamo i valori che dividono la distribuzione dei residui in percentuali uguali.
+- Calcoliamo la distribuzione empirica ovvero una stima della distribuzione reale dei residui.
+- Calcoliamo la probabilità empirica.
+
+Ciò verrà usato per confrontare le caratteristiche della distribuzione empirica dei residui con le caratteristiche dela distribuzione che stimeremo li abbia generati.
+```{r}
+z <- y_ETS_arima_residuals_mod
+z_st <- (1/sd(z))*as.vector(z-mean(z)) # We standardize the residuals of the ARIMA model.
+z_st_qemp <- qemp(ppoints(z_st), z_st) # The empirical quantiles of the residuals.
+z_st_demp <- demp(z_st_qemp, z_st)     # The empirical probability density of the residuals.
+z_st_pemp <- pemp(z_st_qemp, z_st)     # The empirical probability distribution of the residuals.  
+x <- z_st_qemp
+y_d <- z_st_demp
+y_p <- z_st_pemp
+# dev.cur()
+hist(z_st, col="green", border="black", xlim=c(x[1]-2.0, x[length(x)]+2.0), ylim=c(0, y_d[length(y_d)]+0.75), 
+     freq=FALSE, main="Density Histogram and Empirical Density Function of the Standardized Residuals of the 
+     ARIMA model", xlab="Standardized Residuals", ylab="Histogram Values+Density Function")
+lines(density(z_st), lwd=2, col="darkgreen")
+```
+Definiamo l'adattamento a una distribuzione *logistica*.
+```{r}
+fitdist_glogis <- fitdist(z_st, "glogis", start=list(location=0, scale=sqrt(3)/pi, shape=1), method="mle")
+summary(fitdist_glogis)
+# Note that, corresponding to the estimated parameters, we have
+location <- as.numeric(fitdist_glogis$estimate[1])
+scale <- as.numeric(fitdist_glogis$estimate[2])
+shape <- as.numeric(fitdist_glogis$estimate[3])
+mean <- location+(digamma(shape)-digamma(1))*scale
+sd <-  sqrt((psigamma(shape, deriv=1)+psigamma(1, deriv=1))*scale^2)
+skewness <- (psigamma(shape, deriv=2)-psigamma(1, deriv=2))/((psigamma(shape, deriv=1)+psigamma(1, deriv=1) )^(3/2))
+# We plot the density of the estimated generalized logistic together with the histogram and the empirical density
+hist(z_st, col="green", border="black", xlim=c(x[1]-2.0, x[length(x)]+2.0), ylim=c(0, y_d[length(y_d)]+0.75), 
+     freq=FALSE, main="Density Histogram of the Standardized Residuals of the ARIMA model+Empirical Density+Estimated Generalized Logistic Density", xlab="Standardized Residuals", ylab="Density")
+lines(density(z_st), lwd=2, col="darkgreen")
+lines(x, dglogis(x, location=location, scale=scale, shape=shape), lwd=2, col="red")
+```
+Adesso, consideriamo l'adattamento con la distribuzione di *Student* generalizzata.
+```{r}
+dt_ls <- function(x, m, s, df)	1/s*dt((x-m)/s, df)
+pt_ls <- function(q, m, s, df)  pt((q-m)/s, df)
+qt_ls <- function(p, m, s, df)  qt(p, df)*s+m
+rt_ls <- function(n, m, s, df)  rt(n,df)*s+m
+fitdist_t_ls <- fitdist(z_st, "t_ls", start=list(m=0, s=sqrt(1/3), df=3), method="mle")
+summary(fitdist_t_ls)
+fitdist_t_ls_m <- as.numeric(fitdist_t_ls$estimate[1])
+fitdist_t_ls_s <- as.numeric(fitdist_t_ls$estimate[2])
+fitdist_t_ls_df <- as.numeric(fitdist_t_ls$estimate[3])
+# We plot the density of the estimated generalized Student together with the histogram and the empirical density
+hist(z_st, col="green", border="black", xlim=c(x[1]-2.0, x[length(x)]+2.0), ylim=c(0, y_d[length(y_d)]+0.75), 
+     freq=FALSE, main="Density Histogram of the Standardized Residuals of the ARIMA model+Empirical 
+     Density+Estimated Generalized Student Density", xlab="Standardized Residuals", ylab="Density")
+lines(density(z_st), lwd=2, col="darkgreen")
+lines(x, dt_ls(x, m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df), lwd=2, col="blue")
+legend("topleft", legend=c("Empirical Density", "Estimated Density"), col=c("darkgreen", "blue"), 
+       lty=1, lwd=0.1, cex=0.8, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0,
+       inset=-0.01, bty="n")
+```
+Inoltre, tracciamo la densità della *logistica* e della *Student* stimate insieme all'istogramma e alla densità empirica.
+```{r}
+hist(z_st, col="green", border="black", xlim=c(x[1]-2.0, x[length(x)]+2.0), ylim=c(0, y_d[length(y_d)]+0.75), 
+     freq=FALSE, main="Density Histogram of the Standardized Residuals of the ARIMA model+Empirical 
+     Density+Estimated Generalized Logistic Density+Estimated Generalized Student Density", 
+     xlab="Standardized Residuals", ylab="Density")
+lines(density(z_st), lwd=2, col="darkgreen")
+lines(x, dglogis(x, location=location, scale=scale, shape=shape), lwd=2, col="red")
+lines(x, dt_ls(x, m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df), lwd=2, col="blue")
+legend("right", legend=c("Empirical Density", "Gen. Logistic Estimated Density", "Gen. Student Estimated Density"), 
+       col=c("darkgreen", "red", "blue"), 
+       lty=1, lwd=0.1, cex=0.8, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0,
+       inset=-0.01, bty="n")
+```
+Si traccia il grafico *CDF (cumulative distribution function)* per confrontare la funzione di distribuzione cumulativa empirica con quella stimata dalla distribuzione di probabilità logistica. Questo permette di valutare se la distribuzione di probabilità stimata si adatta bene ai dati empirici.
+```{r}
+# For instance, we can immediately compare the empirical probability distribution function with the fitted 
+# probability distribution function
+cdfcomp(fitdist_glogis)
+```
+
+In seguito si tracciano *Q-Q plot* e *P-P plot*. 
+
+- Il grafico **Q-Q plot** confronta i quantili della distribuzione di probabilità empirica con quelli della distribuzione teorica o stimata. Questo permette di valutare se le due distribuzioni sono simili o se differiscono significativamente tra loro. Se le due distribuzioni sono simili, i punti sul grafico Q-Q plot si adatteranno a una retta diagonale. Se le due distribuzioni differiscono, i punti sul grafico Q-Q plot si discosteranno dalla retta diagonale.
+
+- Il grafico **P-P plot** confronta le funzioni di distribuzione cumulativa della distribuzione di probabilità empirica con quella della distribuzione teorica o stimata. Anche in questo caso, se le due distribuzioni sono simili, i punti sul grafico P-P plot si adatteranno a una retta diagonale. Se le due distribuzioni differiscono, i punti sul grafico P-P plot si discosteranno dalla retta diagonale.
+
+In generale, i grafici *Q-Q plot* e *P-P plot* vengono utilizzati per valutare la bontà di adattamento di una distribuzione teorica o stimata ai dati empirici. Se le due distribuzioni sono simili, la distribuzione teorica o stimata può essere considerata un buon modello per i dati. Se le due distribuzioni differiscono significativamente, è necessario considerare l'utilizzo di un modello diverso o di modificare i parametri del modello.
+```{r}
+# We can immediately compare draw a draft Q-Q plot and P-P plot.
+par(mfrow=c(1,2))
+qqcomp(fitdist_glogis)
+ppcomp(fitdist_glogis)
+par(mfrow=c(1,1))
+```
+Si traccia anche un *Q-Q plot* più dettagliato.
+```{r}
+x <- z_st_qemp
+fitdist_glogis_location <- as.numeric(fitdist_glogis$estimate[1])
+fitdist_glogis_scale <- as.numeric(fitdist_glogis$estimate[2])
+fitdist_glogis_shape <- as.numeric(fitdist_glogis$estimate[3])
+car::qqPlot(x, distribution ="glogis", location=fitdist_glogis_location, scale=fitdist_glogis_scale, shape=fitdist_glogis_shape,
+            line="robust", 
+            col=carPalette()[2], col.lines=carPalette()[8],
+            pch=16, cex=0.5, las=1,
+            main=bquote(atop("QQ-plot of the Standardized Residuals of the ARIMA Model for ETS remainder Component",
+                             paste("of the Box-Cox Transformation of the Monthly Toyota Camry Sales Time Series Against the Generalized Logistic Distribution with Location ", .(location),", Scale ", .(scale),", and Shape ", .(shape),"."))),
+            xlab=bquote(paste("Theoretical Quantiles of the Generalized Logistic Distribution")), 
+            ylab="Quantiles of the Empirical Distribution of the Residuals")
+# adding the interquartile line, corresponding to the option "quartiles" of the parameter line.
+probs <- c(0.25,0.75)
+quant_x <- as.vector(quantile(x, probs))
+quant_t <- qglogis(probs, location=location, scale=scale, shape=shape)
+slope <- diff(quant_x)/diff(quant_t)
+int <- quant_x[1]-slope*quant_t[1]
+abline(a=int, b=slope, col="black", lwd=1)
+# adding the first bisector of the axis line, corresponding to the option "0-1" of the parameter qq.line.type. 
+abline(a=0, b=1, col="green", lwd=1)
+legend("topleft", 
+       legend=c("robust regression line", "interquartile line", "y=x line"),
+       col=c("red", "black", "green"), 
+       lty=1, lwd=0.1,
+       cex=0.80, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1,
+       inset=-0.01, bty="n")
+```
+Si effettuano gli stessi passaggi per la distribuzione stimata di *Student*.
+```{r}
+cdfcomp(fitdist_t_ls)
+par(mfrow=c(1,2))
+qqcomp(fitdist_t_ls)
+ppcomp(fitdist_t_ls)
+par(mfrow=c(1,1))
+```
+Si traccia anche un *Q-Q plot* più dettagliato.
+```{r}
+x <- z_st_qemp
+fitdist_t_ls_m <- as.numeric(fitdist_t_ls$estimate[1])
+fitdist_t_ls_s <- as.numeric(fitdist_t_ls$estimate[2])
+fitdist_t_ls_df <- as.numeric(fitdist_t_ls$estimate[3])
+car::qqPlot(x, distribution ="t_ls", m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df,
+            line="robust", 
+            col=carPalette()[2], col.lines=carPalette()[8],
+            pch=16, cex=0.5, las=1,
+            main=bquote(atop("QQ-plot of the Standardized Residuals of the ARIMA Model for ETS remainder Component",
+                             paste("of the Box-Cox Transformation of the Monthly Toyota Camry Sales Time Series Against the Generalized Student Distribution with Location ", .(fitdist_t_ls_m),", Scale ", .(fitdist_t_ls_s),", and Degrees of Freedom ", .(fitdist_t_ls_df),"."))),
+            xlab=bquote(paste("Theoretical Quantiles of the Generalized Student Distribution")), 
+            ylab="Quantiles of the Empirical Distribution of the Residuals")
+probs <- c(0.25,0.75)
+quant_x <- as.vector(quantile(x, probs))
+quant_t <- qt_ls(probs, m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df)
+slope <- diff(quant_x)/diff(quant_t)
+int <- quant_x[1]-slope*quant_t[1]
+abline(a=int, b=slope, col="black", lwd=1)
+# adding the first bisector of the axis line, corresponding to the option "0-1" of the parameter qq.line.type.
+abline(a=0, b=1, col="green", lwd=1)
+legend("topleft",
+       legend=c("robust regression line", "interquartile line", "y=x line"),
+       col=c("red", "black", "green"),
+       lty=1, lwd=0.1,
+       cex=0.80, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1,
+       inset=-0.01, bty="n")
+
+```
+Da una prima ispezione visiva si nota che entrambe le distribuzioni fittano bene la densità empirica, di conseguenza si procederà con un'analisi più accurata per vedere quale delle due è migliore.
+
+Adesso l'idea è eseguire il *bootstrapping* per stimare l'incertezza nei parametri adattati.
+
+Innanzitutto, adattiamo una distribuzione t di *Student* con media zero al dataset standardizzato *z_st*.
+
+Successivamente, si utilizza la funzione *bootdist* per generare 1.000 campioni bootstrap della distribuzione adattata e stimare l'incertezza nelle stime dei parametri. Si estrae il valore mediano delle stime dei parametri dai campioni bootstrap e si arrotondano, salvandoli nella variabile *student_zero_mean_params*.
+
+Analogamente, eseguiamo il bootstrapping sulla distribuzione logistica generalizzata adattata precedentemente nel codice utilizzando la funzione bootdist. Estraiamo i valori mediani dei parametri di *location*, *scale* e *shape* dai campioni bootstrap. Calcoliamo anche i limiti inferiori e superiori degli intervalli di confidenza del 95% per questi parametri.
+
+Infine, utilizziamo le funzioni *fminunc* e *fmincon* per minimizzare il quadrato della funzione media della distribuzione logistica generalizzata adattata, con il vincolo che la media della distribuzione deve essere zero. Utilizziamo le stime mediane dei parametri e i limiti inferiori e superiori degli intervalli di confidenza come valori iniziali e vincoli per l'ottimizzazione. Salviamo quindi i valori dei parametri arrotondati dalla procedura non vincolata nella variabile logis_params. Calcoliamo anche la log-verosimiglianza, l'AIC e il BIC per la distribuzione logistica generalizzata adattata.
+```{r}
+fitdist_t_ls_zero_mean <- fitdist(z_st, "t_ls", start=list(s=sqrt(1/3), df=3), method="mle", fix.arg=list(m=0))
+summary(fitdist_t_ls_zero_mean)
+# Again, the *bootdist* function the library *fitdistrplus* allows to evaluate the uncertainty in estimated parameters of the fitted distribution.
+fitdist_t_ls_zero_mean_bd <- bootdist(fitdist_t_ls_zero_mean, niter=1000)
+summary(fitdist_t_ls_zero_mean_bd)
+# In this case we extract and round directly the median value of the parameters till the 5th decimal digit. 
+fitdist_t_ls_zero_mean_bd_med <- c(median(fitdist_t_ls_zero_mean_bd$estim$s), median(fitdist_t_ls_zero_mean_bd$estim$df))
+show(fitdist_t_ls_zero_mean_bd_med)
+student_zero_mean_params <- round(fitdist_t_ls_zero_mean_bd_med, 2)
+show(student_zero_mean_params)
+set.seed(12345)
+fitdist_glogis_bd <- bootdist(fitdist_glogis, niter=1000)
+summary(fitdist_glogis_bd)
+# This should be compared with the summary of the list *fitdist_glogis*
+summary(fitdist_glogis)
+# Recalling that the mean of the generalized logistic distribution is given by
+# mean=location+(digamma(shape)-digamma(1))*scale
+# The summary of *fitdist_glogis_bd* can advice about the choice of set of location, scale, and shape parameters 
+# yielding a zero mean
+# In fact, setting
+fitdist_glogis_bd_med <- c(median(fitdist_glogis_bd$estim$location), median(fitdist_glogis_bd$estim$scale), median(fitdist_glogis_bd$estim$shape))
+fitdist_glogis_bd_low <- c(quantile(fitdist_glogis_bd$estim$location, 0.025), quantile(fitdist_glogis_bd$estim$scale, 0.025), quantile(fitdist_glogis_bd$estim$shape, 0.025))
+fitdist_glogis_bd_up <- c(quantile(fitdist_glogis_bd$estim$location, 0.975), quantile(fitdist_glogis_bd$estim$scale, 0.975), quantile(fitdist_glogis_bd$estim$shape, 0.975))
+# by means of the function *fminunc* (unconstrained minimization and *fmincon* (onstrained optimization in the
+# *pracma*, we can minimize the square of the mean function in the hope to achieve the zero value
+fun <- function(x) (x[1]+(digamma(x[3])-digamma(1))*x[2])^2
+# We write the square of the mean in terms of a function to be minimized
+min_unc_mean <- fminunc(x0=fitdist_glogis_bd_med, fun) 
+min_con_mean <- fmincon(x0=fitdist_glogis_bd_med, fun, lb=fitdist_glogis_bd_low, ub=fitdist_glogis_bd_up)
+# Alternatively, we use the vector *fitdist_glogis_bd_med* as a starting point of the constrained minimization procedure
+# and the vector *fitdist_glogis_bd_low* [res. *fitdist_glogis_bd_up*] as lower [res. upper] bound of the minimization procedure. 
+# Note that the results of the two optimization procedures agree till the 2th decimal digit.
+# However, this agreement depends on the choice of the pseudo-random seed.
+round(min_unc_mean$par,2)==round(min_con_mean$par,2)
+# Furthermore, setting
+logis_params <- round(min_unc_mean$par,2)
+# and computing the minimized function on the rounded parameters, we obtain
+fun(logis_params)
+x <- z_st
+glogis_logLik <- sum(dglogis(x, location=logis_params[1], scale=logis_params[2], shape=logis_params[3], log=TRUE))
+glogis_AIC <- 2*length(logis_params)-2*glogis_logLik
+glogis_BIC <- length(logis_params)*log(length(x))-2*glogis_logLik
+```
+Si utilizzano, quindi, i seguenti test per valutare la bontà di adattamento delle due distribuzioni di probabilità stimate ai dati:
+
+- *Kolmogorov-Smirnov test*
+- *Cramer-Von Mises test*
+- *Anderson-Darling test*
+
+*Kolmogorov-Smirnov test*
+```{r}
+# The Kolmogorov-Smirnov test in the library *stats*
+x <- z_st
+KS_x_st_glogis <- ks.test(x, y="pglogis", location=logis_params[1], scale=logis_params[2], shape=logis_params[3], alternative="two.sided")
+show(KS_x_st_glogis)
+KS_x_st_t_ls <- ks.test(x, y="pt_ls", m=0, s=student_zero_mean_params[1], df=student_zero_mean_params[2], alternative="two.sided")
+show(KS_x_st_t_ls)
+```
+*Cramer-Von Mises test*
+```{r}
+# The Cramer-Von Mises test in the library *goftest*.
+# This function performs the Cramer-Von Mises test of goodness-of-fit to the distribution specified by the 
+# argument null. It is assumed that the values in x are independent and identically distributed random values, 
+# with some cumulative distribution function F. The null hypothesis is that F is the function specified by the 
+# argument null, while the alternative hypothesis is that F is some other function.
+CVM_x_st_glogis <- cvm.test(z_st, null="pglogis", location=logis_params[1], scale=logis_params[2], shape=logis_params[3], estimated=FALSE)
+show(CVM_x_st_glogis)
+CVM_x_st_t_ls <- cvm.test(z_st, null="pt_ls", m=0, s=student_zero_mean_params[1], df=student_zero_mean_params[2], estimated=FALSE)
+show(CVM_x_st_t_ls)
+```
+*Anderson-Darling test*
+```{r}
+# The Anderson-Darling test in the library *goftest*.
+AD_x_st_glogis <- ad.test(z_st, "pglogis", location=logis_params[1], scale=logis_params[2], shape=logis_params[3], estimated=FALSE)
+show(AD_x_st_glogis)
+AD_x_st_t_ls <- ad.test(z_st, "pt_ls", m=0, s=student_zero_mean_params[1], df=student_zero_mean_params[2], estimated=FALSE)
+show(AD_x_st_t_ls)
+```
+Dai *p-values* ottenuti si nota che la distribuzione *logistica* stimata si adatta meglio ai dati (come si era ipotizzato tramite l'ispezione del *Cullen-Frey graph*), di conseguenza si andrà a utilizzare questa per la creazione degli intervalli di predizione.
+
+### 2. Forecast
+Per eseguire il *forecast* del modello eseguiamo le predizioni sulle componenti derivate dall'*exponential smoothing* tramite la funzione *forecast* di *R*. Il remainder, invece, verrà predetto tramite il modello *ARMA* trovato in precedenza.
+Si calcolano inoltre le bande di predizione (80% e 90%) del rumore.
+
+#### ETS forecast
+```{r}
+y_BCT_log <- Camry_TrnS_df$y_BCT_log
+y_log_bc_ets_for <- forecast::forecast(y_log_ETS_AAA, h = TstS_length, level=c(0.8, 0.95), interval= 'prediction', bootstrap = TRUE, npaths=5000)
+autoplot(y_log_bc_ets_for)
+```
+#### Remainder forecast
+Per effettuare la predizione del *remainder* si utilizza il modello *ARIMA* trovato in precedenza. Le bande di predizione, invece, vengono calcolate mediante l'utilizzo dei quantili della distribuzione di *Student* al 5%, 20%, 80%, 95% moltiplicati per lo *standard error* della previsione del modello *ARIMA*. 
+Il quantile rappresenta il valore al quale la probabilità cumulativa della distribuzione è uguale al livello di confidenza desiderato.
+
+L'errore standard della previsione rappresenta la deviazione standard dell'errore di previsione del modello ARIMA. In altre parole, rappresenta la misura della dispersione dei dati intorno alla linea di previsione.
+
+Moltiplicando il quantile della distribuzione *logistica* per l'errore standard della previsione, si ottiene una stima dell'ampiezza dell'intervallo di confidenza per la previsione. Questo viene quindi sommato alla previsione media per ottenere le bande inferiori e superiori della previsione al livello di confidenza desiderato.
+```{r}
+y_log_bc_ets_for_mean <- y_log_bc_ets_for[["mean"]]
+AUTOARIMA_y_AIC <- arima(y, order=c(0,0,6), include.mean=FALSE, method="CSS-ML")
+y_res_ARIMA_pred_for <- forecast::forecast(AUTOARIMA_y_AIC, h=TstS_length, level = c(80, 95), bootstrap = TRUE)
+autoplot(y_res_ARIMA_pred_for)
+y_res_ARIMA_pred_for_mean <- y_res_ARIMA_pred_for[["mean"]]
+ARIMA_y_AIC_pred <- predict(AUTOARIMA_y_AIC, n.ahead = TstS_length)
+s=student_zero_mean_params[1]
+df=student_zero_mean_params[2]
+y_res_log_pred_RH_for_080_low_int <- (y_res_ARIMA_pred_for_mean
+                                       +qlogis(0.20, location=logis_params[1], scale=logis_params[2])*ARIMA_y_AIC_pred$se)
+y_res_log_pred_RH_for_080_upp_int <- (y_res_ARIMA_pred_for_mean
+                                       +qlogis(0.80, location=logis_params[1], scale=logis_params[2])*ARIMA_y_AIC_pred$se)
+y_res_log_pred_RH_for_095_low_int <- (y_res_ARIMA_pred_for_mean
+                                       +qlogis(0.05, location=logis_params[1], scale=logis_params[2]) *ARIMA_y_AIC_pred$se)
+y_res_log_pred_RH_for_095_upp_int <- (y_res_ARIMA_pred_for_mean
+                                       +qlogis(0.95, location=logis_params[1], scale=logis_params[2]) *ARIMA_y_AIC_pred$se)
+```
+#### Total forecast 
+Una volta applicati i vari metodi di predizione, si procede unendo in maniera additiva i valori trovati per poi utilizzare le metriche di accuratezza da confrontare con il miglior modello *STL* trovato precedentemente.
+```{r}
+sales_log <- as.vector(log(df_Camry$sales))
+sales_log_test <- sales_log[c((TrnS_length+1):(TrnS_length+TstS_length))]
+y_log_bc_ets_tot_for <- as.vector(y_log_bc_ets_for_mean) + as.vector(y_res_ARIMA_pred_for_mean)
+sales_log_ets_point_for <- c(sales_log[c(1:TrnS_length)], y_log_bc_ets_tot_for)
+y_log_pred_RH_for_080_low_int <-  as.vector(y_log_bc_ets_for_mean) + y_res_log_pred_RH_for_080_low_int
+y_log_pred_RH_for_080_upp_int <-  as.vector(y_log_bc_ets_for_mean) + y_res_log_pred_RH_for_080_upp_int
+y_log_pred_RH_for_095_low_int <-  as.vector(y_log_bc_ets_for_mean) + y_res_log_pred_RH_for_095_low_int
+y_log_pred_RH_for_095_upp_int <-  as.vector(y_log_bc_ets_for_mean) + y_res_log_pred_RH_for_095_upp_int
+
+sales_log_boot_080_low_ets_for_int <- c(rep(NA,TrnS_length),y_log_pred_RH_for_080_low_int)
+sales_log_boot_080_upp_ets_for_int <- c(rep(NA,TrnS_length),y_log_pred_RH_for_080_upp_int)
+sales_log_boot_095_low_ets_for_int <- c(rep(NA,TrnS_length),y_log_pred_RH_for_095_low_int)
+sales_log_boot_095_upp_ets_for_int <- c(rep(NA,TrnS_length),y_log_pred_RH_for_095_upp_int)
+
+sales_ets_pred_df <- add_column(df_Camry, sales_log=sales_log, 
+                                sales_log_ets_point_for=sales_log_ets_point_for,
+                                sales_log_boot_080_low_ets_for_int=sales_log_boot_080_low_ets_for_int, 
+                                sales_log_boot_080_upp_ets_for_int=sales_log_boot_080_upp_ets_for_int,
+                                sales_log_boot_095_low_ets_for_int=sales_log_boot_095_low_ets_for_int, 
+                                sales_log_boot_095_upp_ets_for_int=sales_log_boot_095_upp_ets_for_int,
+                                .after="sales")
+tail(sales_ets_pred_df, 20)
+```
+Viene inizialmente effettuato un plot in cui in cui viene messo a confronto il *path* reale dei dati con quello predetto utilizzando solo le medie delle predizioni.
+```{r}
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), serie ="Toyota Camry path") +
+  autolayer(ts(y_log_bc_ets_tot_for, start=c(2021, 11), end=c(2022, 11), frequency = 12), series="Forecast with ETS+ARMA") +
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecast Toyota Camry sales") +
+  guides(colour=guide_legend(title="Legend"))
+```
+Per poi passare a un plot più completo in cui sono presenti gli intervalli di predizione dati dallo studio dei residui del modello *ARMA*.
+```{r}
+Data_df <- sales_ets_pred_df
+tail(Data_df)
+length <- nrow(Data_df)
+T <- TrnS_length
+title_content <- bquote(atop("Line Plot of the Toyota Camry sales Training Set and Predicted Test Sets - from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Training set length ", .(TrnS_length), " sample points. Test set length ", .(TstS_length), " sample points."))
+caption_content <- ("Author: Matteo Chiacchia")
+x_name <- bquote("")
+# library(numbers)
+# primeFactors(T)
+x_breaks_num <- 33
+x_breaks_min <- Data_df$t[1]
+x_breaks_max <- Data_df$t[length]
+x_binwidth <- floor((x_breaks_max-x_breaks_min)/x_breaks_num)
+x_breaks <- seq(from=x_breaks_min, to=x_breaks_max, by=x_binwidth)
+if((x_breaks_max-max(x_breaks))>x_binwidth/2){x_breaks <- c(x_breaks,x_breaks_max)}
+x_labs <- paste(Data_df$Month[x_breaks],Data_df$Year[x_breaks])
+J <- 0
+x_lims <- c(x_breaks_min-J*x_binwidth, x_breaks_max+J*x_binwidth)
+y_name <- bquote("Sales")
+y_breaks_num <- 10
+y_max <- max(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_upp_ets_for_int))
+y_min <- min(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_low_ets_for_int))
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- floor(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+line_black   <- bquote("in-sample path")
+line_magenta <- bquote("real path")
+line_brown   <- bquote("predicted path")
+line_green   <- bquote("80% pred.int.")
+# line_blue    <- bquote("95% pred.int.")
+line_red     <- bquote("95% pred.int.")
+leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_red)
+leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_red")
+leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+                     "line_green"="green", "line_red"="red")
+# leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_blue, line_red)
+# leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_blue", "line_red")
+# leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+#                      "line_green"="green", "line_blue"="blue", "line_red"="red")
+fill_g <- bquote("90% pred. band")
+# fill_b <- bquote("95% pred. band")
+fill_r <- bquote("95% pred. band")
+fill_g <- bquote("90% pred. band")
+fill_b <- bquote("95% pred. band")
+fill_r <- bquote("99% pred. band")
+leg_fill_labs   <- c( fill_g, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_r"="orangered")
+leg_fill_labs   <- c( fill_g, fill_b, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_b", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_b"="blue", "fill_r"="orangered")
+leg_col_labs    <- leg_line_labs
+leg_col_breaks  <- leg_line_breaks
+leg_col_cols    <- leg_line_cols
+y_pred_lp <- ggplot(Data_df, aes(x=t)) + 
+  geom_line(data=subset(Data_df, Data_df$t <= t[T+1]), aes(y=sales_log, color="line_black"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log, color="line_magenta"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_ets_point_for , colour="line_brown"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_low_ets_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_upp_ets_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_low_ets_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_upp_ets_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_ets_for_int, ymax=sales_log_boot_095_upp_ets_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_ets_for_int, ymax=sales_log_boot_095_upp_ets_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_095_low_ets_for_int, ymax=sales_log_boot_080_low_ets_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_080_upp_ets_for_int, ymax=sales_log_boot_095_upp_ets_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="lightgreen",
+              aes(ymin=sales_log_boot_080_low_ets_for_int, ymax=sales_log_boot_080_upp_ets_for_int, fill="fill_g")) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  guides(linetype="none", shape="none") +
+  scale_colour_manual(name="Legend", labels=leg_line_labs, values=leg_line_cols, breaks=leg_line_breaks) +
+  scale_fill_manual(name="", labels=leg_fill_labs, values=leg_fill_cols, breaks=leg_fill_breaks) +
+  guides(colour=guide_legend(order=1), fill=guide_legend(order=2)) +
+  theme(plot.title=element_text(hjust = 0.5), 
+        plot.subtitle=element_text(hjust =  0.5),
+        plot.caption = element_text(hjust = 1.0),
+        axis.text.x = element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width = unit(0.8,"cm"), legend.position="bottom")
+plot(y_pred_lp)
+```
+### 3. Accuracy
+Indici di accuratezza del modello *ETS*
+```{r}
+Camry_BTC_log_ets_point_pred_accuracy <- forecast::accuracy(y_log_bc_ets_tot_for, sales_log_test)
+show(Camry_BTC_log_ets_point_pred_accuracy)
+Camry_BTC_log_ets_point_resid <- sales_log_test-y_log_bc_ets_tot_for
+Camry_log_ets_point_pred_MASE <- fabletools::MASE(Camry_BTC_log_ets_point_resid, sales_log,
+                                                      demean = FALSE, na.rm = TRUE, .period=12)
+show(Camry_log_ets_point_pred_MASE)
+```
+
+Richiamo dei valori di accuratezza del modello *STL*:
+
+- **ME**: -0.07400812
+- **RMSE**: 0.1935752
+- **MAE**: 0.1302366
+- **MPE**: -0.7609418
+- **MAPE**: 1.308794
+- **MASE**: 0.673770
+
+Dall'analisi dei valori di accuratezza emerge che l'*STL model* sembra avere prestazioni migliori rispetto all'*ETS model* in termini di **MAE**, **MAPE** e **MASE.** Tuttavia, l'*STL model* ha un valore leggermente superiore di **RMSE** e tende a sovrastimare i valori di output in modo leggermente più consistente rispetto a quanto li sottostimi, invece, l'*ETS model*. Pertanto, se la precisione delle previsioni è la priorità principale, allora l'*ETS model* potrebbe sembrare preferibile, mentre se l'obiettivo è minimizzare l'errore medio assoluto, l'*STL model* è il quello migliore.
+
+Per completezza si analizza anche il confronto grafico delle due previsioni.
+```{r}
+sales_log_stl_point_pred_df <- read.csv("sales_log_stl_point_pred_df")
+y_log_stl_point_pred  <- sales_log_stl_point_pred_df$sales_log_naive_point_pred
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), series = "Real Path") +
+  autolayer(ts(y_log_stl_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="STL+ARMA")+
+  autolayer(ts(y_log_bc_ets_tot_for, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="ETS+ARMA")+
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecasts Toyota Camry sales") +
+  guides(colour=guide_legend(title="Forecast"))
+```
+#### Diebold-Mariano test
+
+Il *Diebold-Mariano Test* è un test statistico utilizzato per valutare la bontà di previsione di due modelli di previsione. In particolare, il test confronta l'errore medio quadratico (*MSE*) dei due modelli in modo da determinare se uno di essi è significativamente migliore dell'altro.
+HP nulla: I modelli hanno la stessa capacità predittiva
+Il test è stato effettuato per verificare:
+
+- la bontà del *fitting* dei dati
+- la bontà della *previsione*
+
+Diebold-Mariano Test per il *fitting*.
+```{r}
+e1 = Camry_TrnS_df$stl_residuals
+e2 = Camry_TrnS_df$ets_residuals
+Camry_fitted_DM  =dm.test(
+  e1,
+  e2,
+  alternative =  "less",
+  h = 1,
+  power = 2,
+  varestimator =c("acf", "bartlett")
+)
+show(Camry_fitted_DM)
+```
+Il test restituisce un p-value **minore** di 0.05 e ciò sta a indicare che l'ipotesi nulla è rigettata a fronte di quella alternativa, ovvero che il secondo modello (*ETS model*) ha una capacità di *fitting* inferiore a quella dell'*STL model*.
+
+Diebold-Mariano test per l'*accuratezza* della previsione
+```{r}
+Camry_BTC_log_point_resid_df = read.csv(  "Camry_BTC_log_stl_point_resid_df.csv")
+Camry_BTC_log_stl_point_resid = as.array(Camry_BTC_log_point_resid_df$Camry_BTC_log_naive_point_resid)
+e1 = Camry_BTC_log_stl_point_resid #stl residuals of the prediction
+e2 = Camry_BTC_log_ets_point_resid 
+Camry_predict_DM  =dm.test(
+  e1,
+  e2,
+  alternative =  "two.sided",
+  h = 1,
+  power = 2,
+  varestimator =c("acf", "bartlett")
+)
+show(Camry_predict_DM)
+```
+Il test restituisce un p-value elevato indicando che l'ipotesi nulla non viene rigettata a fronte di quella alternativa. Di conseguenza si può affermare che i due modelli hanno una capacità predittiva molto simile.
+
+### 4. Conclusioni
+
+Nello studio appena effettuato possiamo affermare di aver identificato il miglior modello per il *forecast*:
+
+- Il logaritmo per la trasformazione della *TS*
+- La decomposizione *STL* con finestra di *trend* = 29 e finestra di *seasonality* = 11
+- Il processo *ARIMA(4,0,6)* con residui distribuiti con la distribuzione T-student per il remainder della decomposizione STL
+- Il metodo *naive* per il *forecast* del trend.
+
+

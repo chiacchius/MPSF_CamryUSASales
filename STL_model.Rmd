@@ -1,0 +1,2074 @@
+---
+title: "Toyota Camry sales Time Series analysis and forecast using STL model"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+###### Author: Matteo Chiacchia
+###### Prof. Roberto Monte
+
+L’obiettivo dello studio è effettuare il *forecast* della serie storica relativa alle vendite mensili della *Toyota Camry* negli USA.
+Per raggiungere l'obiettivo desiderato, sono stati utilizzate delle tecniche che, a partire dall'analisi accurata dei dati passati, sono in grado di creare un modello di previsione che sia più o meno accurato. In particolare sono stati utilizzati:
+
+- *Modello* ***STL***: Seasonal and Trend decomposition using LOESS.
+- *Modello* ***ETS***: Error-Trend-Seasonality 
+
+## Modello STL
+
+L'algoritmo STL (Seasonal and Trend decomposition using Loess) utilizza la tecnica di smoothing LOESS per analizzare una serie temporale. Esso esegue due cicli di **smoothing**: uno interno che itera tra lo *smoothing* stagionale e quello di trend e uno esterno che riduce al minimo l'effetto degli *outlier* durante il processo di smoothing interno. 
+Nel primo ciclo, viene calcolata la componente *stagionale* e rimossa per calcolare la componente di *trend.* Nel secondo ciclo, le componenti stagionali e di trend vengono sottratte dalla serie temporale per ottenere il *remainder*. In questo modo, l'algoritmo *STL* suddivide la serie temporale in tre componenti principali: la componente *stagionale*, la componente di *trend* e il *remainder*, che può essere interpretato come il *noise* residuo.
+È possibile applicare la decomposizione **STL** a qualsiasi set di dati, ma risultati significativi vengono ottenuti solo se nei dati esiste una componente stagionale.
+
+Rispetto ad altre metodologie:
+
+- Può considerare ogni tipo di stagionalità
+- La componente stagionale può variare nel tempo ed è un parametro settabile dall’utente, così come lo smoothing di trend e ciclicità
+- Presenta un trattamento degli outliers estremamente robusto, che però influenza i residui.
+
+## Time series analysis and forecast with STL
+
+Lo svolgimento dello studio effettuato è classificabile in due macro categorie:
+
+- ***Analisi***: scomposizione della serie storica nelle sue componenti (*Trend*,*Seasonality*). Utilizzo del modello **ARMA** (Autoregressive–moving-average model) per la descrizione della parte stazionaria (*Remainder*).
+
+- ***Previsione***: unione additiva delle predizioni effettuate sulle componenti in maniera isolata.
+
+### 1. Analisi
+
+Il primo passaggio è caricare le librerie di riferimento 
+```{r}
+library(base)
+library(stats)
+library(astsa)
+library(tibble)
+library(dplyr)
+library(readxl)
+library(numbers)
+library(ggplot2)
+library(EnvStats)
+library(DescTools)
+library(lattice)
+library(leaps)
+library(ltsa)
+library(bestglm)
+library(zoo)
+library(lmtest)
+library(forecast)
+library(gridExtra)
+library(grid)
+library(gtable)
+library(tsibble)
+library(fabletools)
+library(fable)
+library(feasts)
+library(crayon)
+library(fBasics)
+library(nortest)
+library(tseries)
+library(survival)
+library(MASS)
+library(fitdistrplus)
+library(glogis)
+library(car)
+library(pracma)
+library(NlcOptim)
+library(goftest)
+library(qqplotr)
+library(BiocManager)
+library(stats4)
+library(dynamicTreeCut)
+library(fastcluster)
+library(xts)
+library(TTR)
+library(quantmod)
+library(urca)
+library(fpp3)
+```
+```{r}
+graphics.off()
+# Removes all items in Environment!
+rm(list=ls())
+# To reset options to default values
+def_options <- options()
+# Sets the data directory.
+WD <- dirname(rstudioapi::getSourceEditorContext()$path)
+show(WD)
+setwd(WD)
+dir()
+#
+# To clear the console
+cat("\014")
+# Functions
+nextodd <- function(x){
+  x <- round(x)
+  if(x%%2==0) x <- x+1
+  as.integer(x)
+}
+```
+I dati relativi alle vendite mensili della *Toyota Camry* negli *USA* sono salvati all'interno del file *Excel* "**Camry_US_sales.xlsx**". Viene effettuato, quindi, il caricamento del file *Excel* e i dati vengono salvati come *Dataframe*.
+```{r}
+df_Camry_US_sales <- read_excel("Camry_US_sales.xlsx")
+tail(df_Camry_US_sales)
+```
+Da notare che il numero di vendite relative a *Dicembre 2022* è uguale a 0, di conseguenza si è deciso di eliminare questo dato e considerare come ultimo elemento del dataframe quello risalente al mese precedente (*Novembre 2022*)
+```{r}
+#delete last row of df because it has not value
+df_Camry_US_sales <- df_Camry_US_sales[-nrow(df_Camry_US_sales), ]
+tail(df_Camry_US_sales)
+head(df_Camry_US_sales)
+```
+I primi dati risalgono a *Gennaio 2005*, ma si è deciso di eseguire l'analisi a partire dai dati del *2009* per evitare che l'influenza dei valori di mercato troppo lontani temporalmente possa avere effetto negativo durante il processo di *analisi* e *forecasting*.
+Aggiungiamo inoltre una colonna (**t**) di indice al *dataframe*, che replica semplicemente i numeri di riga ed è utile per scopi di tracciamento.
+```{r}
+df_Camry_US_sales$date <- as.Date(df_Camry_US_sales$date)
+#time series start = 01/2009
+df_Camry_US_sales <- df_Camry_US_sales[df_Camry_US_sales$date >= "2009-01-31", ]
+df <- data.frame(Year=year(df_Camry_US_sales$date), Month=month(df_Camry_US_sales$date), date=df_Camry_US_sales$date,
+                 sales=as.vector(df_Camry_US_sales$sales))
+
+df <- add_column(add_column(df, t=1:nrow(df), .before="Year"))
+Data_df <- df
+Data_df <- dplyr::rename(Data_df, x=t, y=sales)
+head(df)
+```
+Per effettuare analisi e predizione si è deciso di suddividere il *dataframe* in due parti: ***TrainSet*** e ***TestSet***. 
+La decisione presa è quella di suddividere il *dataframe* in modo tale da avere nel **TestSet** 12 mesi e poter quindi eseguire la predizione su questi (**predizione mensile dell'intero anno successivo**), utlizzando come *Time Series* i valori presenti nel **TrainSet** per creare il modello.
+```{r}
+#parameters
+DS_length <- nrow(Data_df)
+TrnS_length <- floor(DS_length*0.93)
+TstS_length <- DS_length-TrnS_length
+df_string <- sprintf("Data Frame lenght: %d\n", DS_length)
+trn_string <- sprintf("Train Set lenght: %d\n", TrnS_length)
+tst_string <- sprintf("Test Set lenght: %d\n", TstS_length)
+cat(df_string)
+cat(trn_string)
+cat(tst_string)
+```
+Si visualizzano inizialmente i dati tramite lo **Scatter Plot**
+```{r}
+# We draw the scatter plot.
+# We set the initial and final date of the time series. These dates enter the Title of the plot.
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[DS_length],Data_df$Year[DS_length])
+# In case the dates are contained in a single column, *Date*, we use the following syntax.
+# First_Date <- Data_df$Date[1] 
+# Last_Date <- Data_df$Date[DS_length]
+# We set the scatter plot title, the subtitle and the author.
+title_content <- bquote(atop("Scatter Plot of the Monthly Toyota Camry sales in the U.S. - Training and Test Sets - from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Training set length ", .(TrnS_length), " sample points. Test set length ", .(TstS_length), " sample points."))
+caption_content <- "Author: Matteo Chiacchia"
+# We set the x-axis name. However, in this case, since dates will mark the x-axis ticks, we think that it is unnecessary to give the x-axis a name.
+x_name <- bquote("")
+# To obtain the sub-multiples of the length of the data set as a hint on the number of breaks to use, we factorize the length of the time series.
+# library(numbers)
+# primeFactors(DS_length)
+x_breaks_num <- 33
+x_breaks_min <- Data_df$x[1]
+x_breaks_max <- Data_df$x[DS_length]
+# x_binwidth <- floor((x_breaks_max-x_breaks_min)/x_breaks_num)
+x_binwidth <- floor(DS_length/x_breaks_num)
+x_breaks <- seq(from=x_breaks_min, to=x_breaks_max, by=x_binwidth)
+if((x_breaks_max-max(x_breaks))>x_binwidth/2){x_breaks <- c(x_breaks,x_breaks_max)}
+x_labs <- paste(Data_df$Month[x_breaks],Data_df$Year[x_breaks])
+J <- 0.0
+x_lims <- c(x_breaks_min-J*x_binwidth, x_breaks_max+J*x_binwidth)
+y_name <- bquote("Monthly Sales")
+y_breaks_num <- 10
+y_max <- max(na.omit(Data_df$y))
+y_min <- min(na.omit(Data_df$y))
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_min <- y_min-y_binwidth
+y_breaks_max <- y_max+y_binwidth
+y_breaks <- round(seq(from=y_breaks_min, to=y_breaks_max, by=y_binwidth),3)
+# y_breaks_low <- floor((y_min/y_binwidth))*y_binwidth
+# y_breaks_up <- ceiling((y_max/y_binwidth))*y_binwidth
+# y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.0
+y_lims <- c((y_breaks_min-K*y_binwidth), (y_breaks_max+K*y_binwidth))
+# y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+col_k <- bquote("Training set")
+col_b <- bquote("Test set")
+col_g <- bquote("Regression line (training set)")
+col_r <- bquote("LOESS curve (training set)")
+leg_labs   <- c(col_k, col_b, col_g, col_r)
+leg_cols   <- c("col_k"="black", "col_b"="blue", "col_r"="red", "col_g"="green")
+leg_breaks <- c("col_k", "col_b", "col_g", "col_r")
+# library(ggplot2)
+df_sp <- ggplot(Data_df) +
+  geom_vline(xintercept=Data_df$x[TrnS_length], linewidth=0.3, colour="black") +
+  geom_smooth(data=subset(Data_df, Data_df$x <= x[TrnS_length]), alpha=1, linewidth=0.7, linetype="solid", 
+              aes(x=x, y=y, color="col_g"), method="lm", formula=y~x, se=FALSE, fullrange=FALSE) +
+  geom_smooth(data=subset(Data_df, Data_df$x <= x[TrnS_length]), alpha=1, linewidth=0.7, linetype="dashed", 
+              aes(x=x, y=y, color="col_r"), method="loess", formula=y~x, se=FALSE) +
+  geom_point(data=subset(Data_df, Data_df$x <= x[TrnS_length]), alpha=1, size=0.5, shape=19, 
+             aes(x=x, y=y, color="col_k")) +
+  geom_point(data=subset(Data_df, Data_df$x > x[TrnS_length]), alpha=1, size=0.5, shape=19, 
+             aes(x=x, y=y, color="col_b")) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, label=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis=sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  scale_colour_manual(name="Legend", labels=leg_labs, values=leg_cols, breaks=leg_breaks,
+                      guide=guide_legend(override.aes=list(shape=c(19,19,NA,NA), 
+                                                           linetype=c("blank", "blank", "solid", "dashed")))) +
+  theme(plot.title=element_text(hjust=0.5),
+        plot.subtitle=element_text(hjust= 0.5),
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(df_sp)
+```
+e tramite il **Line Plot**
+```{r}
+title_content <- bquote(atop("Line Plot of the Monthly Toyota Camry sales in the U.S. - Training and Test Sets - from ", .(First_Date), " to ", .(Last_Date)))
+# We draw the line plot.
+df_lp <- ggplot(Data_df) +
+  geom_vline(xintercept=Data_df$x[TrnS_length], linewidth=0.3, colour="black") +
+  geom_smooth(data=subset(Data_df, Data_df$x <= x[TrnS_length]), alpha=1, linewidth=0.7, linetype="solid", 
+              aes(x=x, y=y, color="col_g"), method="lm", formula=y~x, se=FALSE, fullrange=FALSE) +
+  geom_smooth(data=subset(Data_df, Data_df$x <= x[TrnS_length]), alpha=1, linewidth=0.7, linetype="dashed", 
+              aes(x=x, y=y, color="col_r"), method="loess", formula=y~x, se=FALSE) +
+  geom_line(data=subset(Data_df, Data_df$x <= x[TrnS_length]), alpha=1, linewidth=0.5, linetype="solid", 
+            aes(x=x, y=y, color="col_k", group=1)) +
+  geom_line(data=subset(Data_df, Data_df$x >= x[TrnS_length]), alpha=1, linewidth=0.5, linetype="solid", 
+            aes(x=x, y=y, color="col_b", group=1)) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, label=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis=sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  scale_colour_manual(name="Legend", labels=leg_labs, values=leg_cols, breaks=leg_breaks,
+                      guide=guide_legend(override.aes=list(linetype=c("solid", "solid", "solid", "dashed")))) +
+  theme(plot.title=element_text(hjust=0.5),
+        plot.subtitle=element_text(hjust=0.5),
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(df_lp)
+```
+Da un'iniziale ispezione visiva dei grafici si nota come la serie storica non abbia un andamento lineare nel tempo. Si può supporre una presenza di una componente *stagionale* e di un *trend* che inizialmente è crescente per diventare in seguito decrescente.
+Non sembra essere presente un'elevata eteroschedacità, essendo lo *spread* del *path* della serie storica all'incirca sempre simile. Questi studi, comunque, verranno effettuati in seguito.
+
+#### Linear Model
+
+L'idea iniziale è quella di considerare un semplice **predittore lineare**.
+```{r}
+Camry_lm <- lm(df$sales[1:TrnS_length]~t[1:TrnS_length], data=df)
+Camry_lm_summ <- summary(Camry_lm)
+show(Camry_lm_summ)
+```
+Per verificare la correttezza del modello lineare si analizzano i suoi residui e si studiano:
+
+- **Omoschedasticità**:  significa che i residui sono equamente distribuiti lungo la linea di regressione, ovvero sopra e sotto la linea di regressione e la varianza dei residui dovrebbe essere la stessa per tutti i punteggi previsti lungo la linea di regressione.
+- **Assenza di autocorrelazione**: L'autocorrelazione si verifica quando i residui non sono indipendenti l'uno dall'altro.
+- **Stazionarietà**: un modello di predizione con residui stazionari garantisce che le previsioni future siano affidabili e non influenzate da fluttuazioni casuali o tendenze temporali.
+- **Gaussianità**: se i residui seguono una distribuzione normale.
+```{r}
+Camry_lm_fit <- Camry_lm[["fitted.values"]]   
+Camry_lm_res <- Camry_lm[["residuals"]]       
+Camry_degfr <- Camry_lm[["df.residual"]]      
+y_res <- as.vector(Camry_lm_res)
+plot(Camry_lm,1)
+```
+In questo caso, dal grafico "*Residuals vs Fitted*", abbiamo una prova visiva della non stazionarietà media dei residui, il che significa che il modello lineare non sembra in grado di spiegare il *trend*. D'altro canto, la prova visiva dell'omoschedasticità è confermata: la diffusione dei residui intorno alla linea LOESS non sembra aumentare.
+```{r}
+plot(Camry_lm,2)
+```
+Dal *Q-Q plot* si ha una forte prova visiva della non *gaussianità* dei residui del modello lineare. 
+
+Per testare computazionalmente la stazionarietà dei residui, si utilizzano solitamente due test: il test di Augmented Dickey-Fuller (*ADF*) e il test di Kwiatowski-Phillips-Schmidt-Shin (*KPSS*). Il test **ADF assume l'ipotesi nulla di non stazionarietà**. In modo più specifico, il test ADF assume che la serie temporale sia generata da un processo stocastico con un componente di random walk.Al contrario, il test **KPSS assume l'ipotesi nulla di stazionarietà**. Infatti, il test KPSS assume che la serie temporale sia generata da un processo autoregressivo. Quando il test *ADF* respinge l'ipotesi nulla e *KPSS* no, abbiamo prove di stazionarietà nella serie temporale. Quando il test *ADF* non respinge l'ipotesi nulla e *KPSS* sì, abbiamo prove di non stazionarietà. Altri casi sono considerati dubbi.
+
+*DF test*:
+```{r}
+ y <- Camry_lm[["residuals"]]   # The data set to be tested.
+num_lags <- 0                   # Setting the lag parameter for the test.
+Camry_lm_res_DF_none <- ur.df(y, type="none", lags=num_lags, selectlags="Fixed")    
+summary(Camry_lm_res_DF_none)   
+```
+
+La statistica del test DF assume un valore all'interno della regione di rigetto al livello di significatività α=0,01 o α=1%. Pertanto, possiamo rigettare l'ipotesi nulla in favore dell'alternativa di stazionarietà media.
+
+*KPSS test*:
+```{r}
+y <- Camry_lm[["residuals"]]    # The data set to be tested
+Camry_lm_res_KPSS_mu <- ur.kpss(y, type="mu", lags="nil", use.lag=NULL)    
+summary(Camry_lm_res_KPSS_mu)    # Showing the result of the test
+```
+
+Il valore della statistica del test KPSS è maggiore del valore critico per il livello di significatività dell'1%, il che significa che dobbiamo rigettare l'ipotesi nulla di stazionarietà media. Questo suggerisce che la serie temporale è probabilmente non stazionaria.
+I test effettuati non ci danno una certezza evidente della stazionarietà media dei residui, di conseguenza il modello lineare non può essere considerato attendibile.
+
+I test computazionali che vengono solitamente applicati per rilevare l'eteroschedasticità nelle serie temporali sono i test di **Breusch-Pagan (BP)** e **White (W)**. 
+
+Abbiamo: 
+- ipotesi nulla - varianze uguali/costanti nei termini di errore;
+- ipotesi alternativa - varianze non uguali/non costanti nei termini di errore.
+
+BP e W sono test $χ^2$. Più alto è il valore di $χ^2$, equivalentemente più basso è il *p-value (Pro b> Chi2)*, meno probabile che i termini di errore siano omogenei.
+
+L'opzione *studentize* è importante quando si tratta di residui con distribuzione heavy tailed (gli eventi rari hanno una probabilità relativamente alta di verificarsi). L'opzione *varformula* consente l'introduzione del test White.
+
+*BREUSCH-PAGAN test*:
+```{r}
+# The studentized Breusch-Pagan test
+t <- 1:length(y_res)
+y_res_stud_BP <- lmtest::bptest(formula=y_res~t, varformula=NULL, studentize=TRUE, data=NULL)
+show(y_res_stud_BP)
+```
+
+Un p-value elevato, come questo (superiore a 0.05), indica che non ci sono prove sufficienti per respingere l'ipotesi nulla di omoschedasticità. Questo significa che non è possibile affermare con certezza che la varianza dei termini di errore non sia costante e che, quindi, sia presente eteroschedasticità.
+
+*WHITE test*:
+```{r}
+# The studentized White test
+t <- 1:length(y_res)
+y_res_stud_W <- lmtest::bptest(formula=y_res~t, varformula=y_res~t+I(t^2), studentize=TRUE, data=NULL)
+show(y_res_stud_W)
+```
+Unp-value elevato come questo (superiore a 0.05), indica che non ci sono prove sufficienti per respingere l'ipotesi nulla di omoschedasticità. Questo significa che non è possibile affermare con certezza che la varianza dei termini di errore non sia costante e che, quindi, sia presente eteroschedasticità.
+
+Dai test appena svolti si può confermare che i residui sono generati da un rumore omoschedastico, come ci si era già accorti in precedenza analizzando visivamente il grafico "Residuals vs Fitted".
+
+Plot dell'autocorrelogramma
+```{r}
+# Plot of the autocorrelogram.
+y <- Camry_lm$residuals
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(T)+45)     # Box-Jenkins
+# maxlag <- ceiling(min(10, T/4))   # Hyndman (for data without seasonality)
+maxlag <- ceiling(min(2*12, T/5))   # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- acf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Autocorrelogram of the Residuals of the Linear Model for Monthly Toyota Camry sales in the U.S. from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5), 
+        plot.subtitle=element_text(hjust= 0.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+Si nota dal grafico una forte autocorrelazione.
+Per completezza si esegue il *Ljiung-box test*.
+```{r}
+y <- y_res
+maxlag <- ceiling(min(2*12, T/5))     # Hyndman https://robjhyndman.com/hyndsight/ljung-box-test/
+Box.test(y, lag = maxlag, type = "Ljung-Box", fitdf = 0)
+```
+Il p-value inferiore a $2.2 * 10^{-16}$ indica che c'è una forte evidenza che i residui non sono indipendenti e che esiste una forma di autocorrelazione seriale nei dati. Possiamo quindi affermare, in linea con l'evidenza visiva dell'autocorrelogramma e con il risultato del *Ljung-Box test*, che i residui del modello lineare **non** sono generati da un rumore con distribuzione indipendente e identicamente distribuita.
+
+Grazie ai risultati appena ottenuti, possiamo rigettare il modello lineare come modello di predizione da utilizzare.
+
+#### STL Model
+
+Il primo passo è quello di isolare il *Train Set* per poterlo utilizzare nelll'analisi. 
+Il modello ottenuto verrà poi utilizzato nella predizione dei valori relativi al *Test Set* per poi procedere con l'utilizzo di varie statistiche di accuratezza per valutare la predizione. 
+```{r}
+#trainset creation
+Camry_TrnS_df <- df[1:TrnS_length,]
+Camry_TstS_df <- df[TrnS_length+1: TrnS_length+TstS_length, ]
+head(Camry_TrnS_df)
+tail(Camry_TrnS_df)
+```
+
+##### Box-Cox trasformations
+
+Le trasformazioni di *Box-Cox* a cui viene sottoposto il *Train Set* sono:
+
+- Trasformazione di Box-Cox col metodo Guerrero
+- Trasformazione di Box-Cox col metodo della massima verosimiglianza
+- Traformazione logaritmica
+- Trasformazione quadratica inversa
+```{r}
+y <- Camry_TrnS_df$sales
+y_BCT_Guerr_lambda <- forecast::BoxCox.lambda(y, method="guerrero")
+tilde_y_BCT_Guerr_lambda <- forecast::BoxCox(y, lambda=y_BCT_Guerr_lambda)
+y_BCT_loglik_lambda <- forecast::BoxCox.lambda(y, method="loglik")
+tilde_y_BCT_loglik_lambda <- forecast::BoxCox(y, lambda=y_BCT_loglik_lambda)
+```
+Una volta calcolate le trasformate, vengono aggiunti i valori al dataframe.
+```{r}
+Camry_TrnS_df <- add_column(Camry_TrnS_df, y_BCT_Guerr=tilde_y_BCT_Guerr_lambda, y_BCT_loglik=tilde_y_BCT_loglik_lambda, 
+                          y_BCT_log=log(y), y_BCT_sqrt=sqrt(y), .after="sales")
+```
+
+Consideriamo i grafici (*scatter e line plot*) delle trasformate.
+```{r}
+# We consider the scatter and line plots of the transformations
+# The scatter plots
+Data_df <- Camry_TrnS_df
+length <- nrow(Data_df)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[length],Data_df$Year[length])
+title_content <- bquote(atop("Scatter Plot of Four Box-Cox Transformations of Toyota Camry sales in the U.S. from ", .(First_Date), " to ", .(Last_Date)))
+caption_content <- "Author: Matteo Chiacchia"
+subtitle_content <- bquote(paste("BCT Guerrero Method - Data set size ", .(length),~~"sample points"))
+x_name <- bquote("")
+# primeFactors(length)
+# primeFactors(length-1)
+x_breaks_num <- 39
+x_breaks_min <- Data_df$t[1]
+x_breaks_max <- Data_df$t[length]
+x_binwidth <- floor((x_breaks_max-x_breaks_min)/x_breaks_num)
+x_breaks <- seq(from=x_breaks_min, to=x_breaks_max, by=x_binwidth)
+if((x_breaks_max-max(x_breaks))>x_binwidth/2){x_breaks <- c(x_breaks,x_breaks_max)}
+# x_labs <- format(x_breaks, scientific=FALSE)
+x_labs <- Data_df$Data[x_breaks]
+J <- 0
+x_lims <- c(x_breaks_min-J*x_binwidth, x_breaks_max+J*x_binwidth)
+col_1 <- bquote("BTC Guerrero method")
+col_2 <- bquote("BTC loglik. method")
+col_3 <- bquote("Log transform.")
+col_4 <- bquote("Sqrt transform.")
+col_5 <- bquote("Regression line")
+col_6 <- bquote("loess")
+leg_labs <- c(col_1, col_2, col_3, col_4, col_5, col_6)
+leg_cols <- c("col_1"="red", "col_2"="green", "col_3"="blue", "col_4"="magenta", "col_5"="black", "col_6"="brown")
+leg_breaks <- c("col_1", "col_2", "col_3", "col_4", "col_5", "col_6")
+# Box-Cox transformation-Guerrero method
+subtitle_content <- bquote(paste("BCT Guerrero Method - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (BCT-Guerr. Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_Guerr)
+y_min <- min(Data_df$y_BCT_Guerr)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- ceiling(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_Guerr_sp <- ggplot(Data_df, aes(x=t))+
+  geom_point(alpha=1, size=1.5, shape=19, aes(y=y_BCT_Guerr, color="col_1"), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_Guerr, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_Guerr, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=NULL, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  #  ggtitle(title_content) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  theme(plot.title=element_text(hjust=0.5, size=18), plot.subtitle=element_text(hjust=0),
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_Guerr_sp)
+# Box-Cox transformation-log-likelihood method 
+subtitle_content <- bquote(paste("BCT Log-likelihood Method - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (BCT-Loglik. Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_loglik)
+y_min <- min(Data_df$y_BCT_loglik)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- ceiling(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_loglik_sp <- ggplot(Data_df, aes(x=t))+
+  geom_point(alpha=1, size=1.5, shape=19, aes(y=y_BCT_loglik, color="col_2"), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_loglik, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_loglik, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=NULL, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  theme(plot.title=element_text(hjust=0.5, size=18), plot.subtitle=element_text(hjust=0), 
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_loglik_sp)
+# Logarithm transformation
+subtitle_content <- bquote(paste("Logarithm Transformation - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (Log. Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_log)
+y_min <- min(Data_df$y_BCT_log)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- ceiling(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_log_sp <- ggplot(Data_df, aes(x=t)) +
+  geom_point(alpha=1, size=1.5, shape=19, aes(y=y_BCT_log, color="col_3"), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_log, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_log, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  theme(plot.title=element_text(hjust=0.5, size=18), plot.subtitle=element_text(hjust=0), 
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_log_sp)
+# Square Root transformation
+subtitle_content <- bquote(paste("Square Root Transformation - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (Sqrt Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_sqrt)
+y_min <- min(Data_df$y_BCT_sqrt)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- floor(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.0
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_sqrt_sp <- ggplot(Data_df, aes(x=t))+
+  geom_point(alpha=1, size=1.5, shape=19, aes(y=y_BCT_sqrt, color="col_4")) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_sqrt, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_sqrt, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  guides(colour=guide_legend(nrow=1)) +
+  theme(plot.title=element_text(hjust=0.5, size=18), plot.subtitle=element_text(hjust=0), 
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_sqrt_sp)
+
+g_legend <- function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+mylegend <- g_legend(y_BCT_sqrt_sp)
+#
+grid.arrange(arrangeGrob(y_BCT_Guerr_sp+theme(legend.position="none"),
+                         y_BCT_loglik_sp+theme(legend.position="none"),
+                         y_BCT_log_sp+theme(legend.position="none"),
+                         y_BCT_sqrt_sp+theme(legend.position="none"),
+                         nrow=2),
+             top=textGrob(title_content, gp=gpar(fontface=1, cex=1.1)),
+             bottom=textGrob(caption_content, gp=gpar(fontface=3, fontsize=9), hjust=1, x=1),
+             mylegend, nrow=2, heights=c(10, 1))
+```
+```{r}
+title_content <- bquote(atop("Line Plot of Four Box-Cox Transformations of Toyota Camry sales in the U.S. from ", .(First_Date), " to ", .(Last_Date)))
+
+# Box-Cox transformation-Guerrero method
+subtitle_content <- bquote(paste("BCT Guerrero Method - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (BCT-Guerr. Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_Guerr)
+y_min <- min(Data_df$y_BCT_Guerr)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- ceiling(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_Guerr_lp <- ggplot(Data_df, aes(x=t))+
+  geom_line(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_Guerr, color="col_1", group=1), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_Guerr, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_Guerr, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=NULL, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  #  ggtitle(title_content) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  theme(plot.title=element_text(hjust=0.5), plot.subtitle=element_text(hjust=0),
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_Guerr_lp)
+# Box-Cox transformation-log-likelihood method 
+subtitle_content <- bquote(paste("BCT Log-likelihood Method - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (BCT-Loglik. Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_loglik)
+y_min <- min(Data_df$y_BCT_loglik)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- ceiling(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_loglik_lp <- ggplot(Data_df, aes(x=t))+
+  geom_line(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_loglik, color="col_2", group=1), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_loglik, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_loglik, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=NULL, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  theme(plot.title=element_text(hjust=0.5), plot.subtitle=element_text(hjust=0), 
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_loglik_lp)
+# Logarithm transformation
+subtitle_content <- bquote(paste("Logarithm Transformation - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (Log. Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_log)
+y_min <- min(Data_df$y_BCT_log)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- ceiling(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.5
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_log_lp <- ggplot(Data_df, aes(x=t)) +
+  geom_line(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_log, color="col_3", group=1), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_log, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_log, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  theme(plot.title=element_text(hjust=0.5), plot.subtitle=element_text(hjust=0), 
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_log_lp)
+# Square Root transformation
+subtitle_content <- bquote(paste("Square Root Transformation - Data set size ", .(length),~~"sample points"))
+y_name <- bquote("Mon. Deaths per 10,000 (Sqrt Tr.)")
+y_breaks_num <- 2
+y_max <- max(Data_df$y_BCT_sqrt)
+y_min <- min(Data_df$y_BCT_sqrt)
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- floor(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0.0
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+y_BCT_sqrt_lp <- ggplot(Data_df, aes(x=t))+
+  geom_line(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_sqrt, color="col_4", group=1), show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=0.8, linetype="solid", aes(x=t, y=y_BCT_sqrt, color="col_5"),
+              method="lm" , formula=y ~ x, se=FALSE, fullrange=FALSE, show.legend=FALSE) +
+  geom_smooth(alpha=1, linewidth=1.0, linetype="dashed", aes(x=t, y=y_BCT_sqrt, color="col_6"), 
+              method="loess", formula=y ~ x, se=FALSE, show.legend=FALSE) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  labs(subtitle=subtitle_content) +
+  scale_color_manual(name="Legend", labels=leg_labs, values=leg_cols) +
+  guides(colour=guide_legend(nrow=1)) +
+  theme(plot.title=element_text(hjust=0.5), plot.subtitle=element_text(hjust=0), 
+        axis.text.x=element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+plot(y_BCT_sqrt_lp)
+grid.arrange(arrangeGrob(y_BCT_Guerr_lp+theme(legend.position="none"),
+                         y_BCT_loglik_lp+theme(legend.position="none"),
+                         y_BCT_log_lp+theme(legend.position="none"),
+                         y_BCT_sqrt_lp+theme(legend.position="none"),
+                         nrow=2),
+             top=textGrob(title_content, gp=gpar(fontface=1, cex=1.1)),
+             bottom=textGrob(caption_content, gp=gpar(fontface=3, fontsize=9), hjust=1, x=1),
+             mylegend, nrow=2, heights=c(10, 1))
+```
+Per il resto dell'analisi si utilizzerà la trasformata che restituisce i migliori valori in termini di omoschedasticità.
+
+**Guerrero Method**:
+```{r}
+y_BCT_Guerr_stud_BP <- lmtest::bptest(formula=y_BCT_Guerr~t, varformula=NULL, studentize=FALSE, data=Data_df)
+show(y_BCT_Guerr_stud_BP)
+
+# The unstudentized White test
+y_BCT_Guerr_stud_W <- lmtest::bptest(formula=y_BCT_Guerr~t, varformula=y_BCT_Guerr~t+I(t^2), 
+                                     studentize=FALSE, data=Data_df)
+show(y_BCT_Guerr_stud_W)
+```
+**Log-Lik Method**:
+```{r}
+# The unstudentized Breusch-Pagan test
+y_BCT_loglik_stud_BP <- lmtest::bptest(formula=y_BCT_loglik~t, varformula=NULL, studentize=FALSE, 
+                                       data=Data_df)
+show(y_BCT_loglik_stud_BP)
+
+# The unstudentized White test
+y_BCT_loglik_stud_W <- lmtest::bptest(formula=y_BCT_loglik~t, varformula=y_BCT_loglik~t+I(t^2), 
+                                      studentize=FALSE, data=Data_df)
+show(y_BCT_loglik_stud_W)
+```
+**Log Method**:
+```{r}
+# The studentized Breusch-Pagan test
+y_BCT_log_stud_BP <- lmtest::bptest(formula=y_BCT_log~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(y_BCT_log_stud_BP)
+
+#
+# The studentized White test
+y_BCT_log_stud_W <- lmtest::bptest(formula=y_BCT_log~t, varformula=y_BCT_log~t+I(t^2), studentize=TRUE, data=Data_df)
+show(y_BCT_log_stud_W)
+```
+**Square Method**:
+```{r}
+# The studentized Breusch-Pagan test
+y_BCT_sqrt_stud_BP <- lmtest::bptest(formula=y_BCT_sqrt~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(y_BCT_sqrt_stud_BP)
+# We have to reject the null of homoscedasticity at the significance level $\alpha=0.1$ or $\alpha=10\%$.
+
+# The studentized White test
+y_BCT_sqrt_stud_W <- lmtest::bptest(formula=y_BCT_sqrt~t, varformula=y_BCT_sqrt~t+I(t^2), studentize=TRUE, 
+                                    data=Data_df)
+show(y_BCT_sqrt_stud_W)
+```
+I risultati migliori vengono restituiti dalla **trasformata logaritmica** (Breusch-Pagan test p-value = 0.8462, White test p-value = 0.1373)
+
+##### **STL DECOMPOSITION**
+
+La decomposizione *STL* è stata applicata alla serie temporale trasformata al fine di suddividerla in tre componenti: *trend*, *stagionalità* e *remainder*. Due parametri della decomposizione **STL** devono essere definiti: la finestra per il *trend* e la finestra per la *stagionalità.* Verranno testati i seguenti set di parametri e verrà selezionato quello che fornisce il remainder con il minor valore di autocorrelazione:
+
+- Finestra trend = NULL e finestra stagionalità = NULL (il che significa che le due finestre saranno selezionate automaticamente dalla funzione R)
+- Finestra trend = 19 e finestra stagionalità = 11
+- Finestra trend = 23 e finestra stagionalità = 11
+- Finestra trend = 27 e finestra stagionalità = 11
+- Finestra trend = 29 e finestra stagionalità = 11
+- Finestra trend = 31 e finestra stagionalità = 11
+
+Questa scelta è stata valutata sulla base dell'ispezione visiva delle tre componenti della serie temporale, dell'ispezione visiva degli autocorrelagrammi totale e parziale e dei risultati dei *test* di valutazione delle ipotesi di omoschedasticità, mancanza di correlazione e stazionarietà del *remainder STL*. La finestra della stagionalità è stata impostata su 11 perché abbiamo una stagionalità annuale nella serie temporale, mentre la finestra del trend viene cambiata. Più alta è la finestra del trend, più tempo (ovvero mesi) è necessario per i cambiamenti del trend.
+```{r}
+Camry_TrnS_ts <- ts(Camry_TrnS_df$y_BCT_log, start=c(2009, 01), end=c(2021, 11), frequency = 12)
+y_log <- Camry_TrnS_df$y_BCT_log
+Camry_TrnS_ts_tsibble <- as_tsibble(Camry_TrnS_ts, key = NULL, index = date)
+Data_tsibble <- Camry_TrnS_ts_tsibble
+```
+
+Plot della decomposizione STL
+```{r}
+Data_tsibble %>%
+  model(STL(y_log ~ trend(window=29)+season(period="1 year", window=11), robust=TRUE)) %>%
+  components() %>% 
+  autoplot()+labs(x="Data")
+```
+Creazione delle componenti (*trend*, *seasonality*, *remainder*) derivate dalla decomposizione.
+```{r}
+y_BCT_log_STL_def_win_dcmp_ts <- Data_tsibble %>%
+  model(STL(y_log ~ trend(window=29)+season(period="1 year", window=11), robust=TRUE)) %>%
+  components()
+y <- y_BCT_log_STL_def_win_dcmp_ts$remainder
+T <- length(y)
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+Box.test(y, lag = maxlag,type = "Ljung-Box", fitdf = 0)
+```
+
+```{r}
+Data_df <- Camry_TrnS_df
+y <- y_BCT_log_STL_def_win_dcmp_ts$remainder
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- acf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Autocorrelogram of the Remainders in the STL Decomp. for the Log. Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+#class(x_breaks)
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=9), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+```{r}
+Data_df <- Camry_TrnS_df
+y <- y_BCT_log_STL_def_win_dcmp_ts$remainder
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- pacf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Partial autocorrelogram of the Remainders in the STL Decomp. for the Log. Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+#class(x_breaks)
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=9), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+Tutti i set di parametri STL testati forniscono un *remainder* che può essere considerato omoschedastico e stazionario. Per quanto riguarda la correlazione, invece, tutti i set forniscono un *remainder* autocorrelato, di conseguenza si andrà a utlizzare il modello **ARMA** per poter descrivere nel modo migliore questo tipo di autocorrelazione. 
+
+L'analisi verrà continuata utilizzando la decomposizione di tempo:
+
+- *trend window* = 29
+- *season window* = 11
+
+L'idea, infatti, è stata quella di catturare al meglio le variazione a lungo termine piuttosto che quelle a breve termine.
+```{r}
+y_BCT_log_STL_remainder <- y_BCT_log_STL_def_win_dcmp_ts$remainder
+```
+
+##### **ARMA model**
+
+I modelli **ARMA** (*Autoregressive Moving Average*) sono una classe di modelli statistici utilizzati per analizzare serie temporali. Questi modelli combinano due componenti principali: l'*autoregressione* (**AR**) e la *media mobile* (**MA**).
+
+Il componente **AR** utilizza i valori precedenti della serie temporale per prevedere i valori futuri. Ciò significa che il valore corrente dipende dalle osservazioni precedenti. Il grado di dipendenza dai valori precedenti dipende dall'ordine del modello AR.
+
+Il componente **MA**, d'altra parte, utilizza l'errore residuo della previsione dell'autoregressione per prevedere i valori futuri. L'ordine del modello MA determina il numero di errori residui utilizzati nella previsione.
+
+L'idea è quella di poter rappresentare il *remainder* tramite un modello **ARMA**.
+Sono stati adottati due diversi approcci in *R* per identificare il miglior modello *ARMA.* Uno si basa su una funzione integrata di *R* ("*auto.arim*a"), mentre l'altro si basa sulla selezione manuale del miglior modello *ARMA* tra quelli testati. Entrambi i metodi selezionano il miglior modello tramite il valore più basso di *AIC* ottenuto.
+In statistica, l'*AIC* (*Akaike's Information Criterion*) è una misura di bontà di adattamento di un modello statistico ai dati osservati. Esso fornisce una stima relativa della qualità di un modello rispetto ad altri modelli alternativi.
+
+L'idea alla base dell'*AIC* è di penalizzare i modelli che includono troppi parametri rispetto al numero di osservazioni, poiché questi modelli rischiano di sovra-adattarsi ai dati di apprendimento e di perdere la capacità di generalizzare ad altri dati (*overfitting*). Pertanto, tra i modelli che forniscono un buon adattamento ai dati, l'*AIC* suggerisce di scegliere quello con il valore minore.
+```{r}
+y <- y_BCT_log_STL_remainder
+ARIMA_y <- list()
+# Setting a counter
+cn <- 1
+# Looping over include.mean
+for(flag in 0:1){
+  # Looping over p
+  for(p in 0:6){
+    # Looping over q
+    for(q in 0:6){
+    #ERROR and WARNINGS HANDLING
+    tryCatch({
+      ARIMA_y[[cn]] <- arima(y, order=c(p,0,q), include.mean=flag, method="CSS-ML")
+      cn <- cn+1
+    }, error = function(e){
+    }, warning = function (w){
+    }
+    )
+  }
+ } 
+}
+
+# Selecting the best model by the Akaike Information Criterium
+ARIMA_y_AIC <- sapply(ARIMA_y, function(x) x$aic)
+#show(ARIMA_y_AIC)
+ARIMA_y_min_AIC <- ARIMA_y[[which(ARIMA_y_AIC==min(ARIMA_y_AIC))]]
+show(ARIMA_y_min_AIC)
+```
+Tramite la selezione manuale otteniamo che il modello **ARIMA (4,0,6)** è quello che restituisce un valore di AIC minore.
+
+Adesso si studia la correlazione dei residui del modello tramite il test di LB test.
+```{r}
+T <- length(y)
+maxlag <- ceiling(min(10, T/4)) 
+ARIMA_y_min_AIC_LB <- Box.test(ARIMA_y[[which(ARIMA_y_AIC==min(ARIMA_y_AIC))]][["residuals"]], 
+                                   lag=maxlag)
+show(ARIMA_y_min_AIC_LB)
+```
+Il *p-value* resituito ci suggerisce che non è presente correlazione nei residui del modello *ARIMA (4,0,6)*.
+
+Viene utilizzata anche la funzione automatica per verificare quale è il miglior modello adatto a descrivere il *remainder STL*.
+```{r}
+y <- y_BCT_log_STL_remainder
+AUTOARIMA_y_AIC <- auto.arima(y, start.p=0, max.p=6, start.q=0, max.q=6, max.order=12, ic="aic", 
+                              allowmean=TRUE, trace=TRUE, stepwise=FALSE, nmodels=94, 
+                              approximation=FALSE)
+```
+La funzione automatica resituisce come miglior modello il modello *ARIMA (6,0,1)*.
+Dai valori restituiti, però, si nota come anche il modello *ARIMA (1,0,0)* restituisca un valore di AIC molto simile al precedente. 
+Per decididere quale modello utilizzare si effettuano i vari test e si verifica, prendendo in considerazione anche la complessità del modello, quale restituisce i valori migliori.
+
+**ARIMA (4,0,6)**
+```{r}
+y <-y_BCT_log_STL_remainder
+num_lags <- 0   # Setting the lag parameter for the test.
+AUTOARIMA_y_AIC <- arima(y, order=c(4,0,6), include.mean=FALSE, method="CSS-ML")
+arima_res=AUTOARIMA_y_AIC[['residuals']]
+# The studentized BP test
+ARIMA_y_AIC_BP <- lmtest::bptest(formula=arima_res~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_BP)
+# The studentized White test
+ARIMA_y_AIC_W <- lmtest::bptest(formula=arima_res~t, varformula=arima_res~t+I(t^2), studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_W)
+# The ADF test
+ARIMA_y_AIC_ADF <- ur.df(AUTOARIMA_y_AIC[['residuals']], type="none", lags=num_lags, selectlags="Fixed")    
+summary(ARIMA_y_AIC_ADF)  
+# The KPSS test
+ARIMA_y_AIC_KPSS <- ur.kpss(AUTOARIMA_y_AIC[['residuals']], type="mu", lags="nil", use.lag=NULL)    
+summary(ARIMA_y_AIC_KPSS)    # Showing the result of the test
+# The LB test
+ARIMA_y_AIC_LB <- Box.test(AUTOARIMA_y_AIC[["residuals"]], lag=maxlag)
+show(ARIMA_y_AIC_LB)
+```
+**ARIMA (6,0,1)**
+```{r}
+AUTOARIMA_y_AIC <- arima(y, order=c(6,0,1), include.mean=FALSE, method="CSS-ML")
+arima_res=AUTOARIMA_y_AIC[['residuals']]
+# The studentized BP test
+ARIMA_y_AIC_BP <- lmtest::bptest(formula=arima_res~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_BP)
+# The studentized White test
+ARIMA_y_AIC_W <- lmtest::bptest(formula=arima_res~t, varformula=arima_res~t+I(t^2), studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_W)
+# The ADF test
+ARIMA_y_AIC_ADF <- ur.df(AUTOARIMA_y_AIC[['residuals']], type="none", lags=num_lags, selectlags="Fixed")    
+summary(ARIMA_y_AIC_ADF)  
+# The KPSS test
+ARIMA_y_AIC_KPSS <- ur.kpss(AUTOARIMA_y_AIC[['residuals']], type="mu", lags="nil", use.lag=NULL)    
+summary(ARIMA_y_AIC_KPSS)    # Showing the result of the test
+# The LB test
+ARIMA_y_AIC_LB <- Box.test(AUTOARIMA_y_AIC[["residuals"]], lag=maxlag)
+show(ARIMA_y_AIC_LB)
+```
+**ARIMA (1,0,0)**
+```{r}
+AUTOARIMA_y_AIC <- arima(y, order=c(1,0,0), include.mean=FALSE, method="CSS-ML")
+arima_res=AUTOARIMA_y_AIC[['residuals']]
+
+# The studentized BP test
+ARIMA_y_AIC_BP <- lmtest::bptest(formula=arima_res~t, varformula=NULL, studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_BP)
+
+# The studentized White test
+ARIMA_y_AIC_W <- lmtest::bptest(formula=arima_res~t, varformula=arima_res~t+I(t^2), studentize=TRUE, data=Data_df)
+show(ARIMA_y_AIC_W)
+
+# The ADF test
+ARIMA_y_AIC_ADF <- ur.df(AUTOARIMA_y_AIC[['residuals']], type="none", lags=num_lags, selectlags="Fixed")    
+summary(ARIMA_y_AIC_ADF)  
+
+# The KPSS test
+ARIMA_y_AIC_KPSS <- ur.kpss(AUTOARIMA_y_AIC[['residuals']], type="mu", lags="nil", use.lag=NULL)    
+summary(ARIMA_y_AIC_KPSS)    # Showing the result of the test
+
+# The LB test
+ARIMA_y_AIC_LB <- Box.test(AUTOARIMA_y_AIC[["residuals"]], lag=maxlag)
+show(ARIMA_y_AIC_LB)
+```
+Riassumento abbiamo i seguenti p-values:
+
+- **ARIMA (4,0,6)**
+  - *Omoschedasticità*
+    - Breusch-Pagan test: 0.9801
+    - White test: 0.2359
+  - *Stazionarietà*
+    - Dickey-Fuller test: < 0.01
+    - Kpss test: > 0.1
+  - *Non correlazione*
+    - Ljung-Box test: 0.9726
+    
+- **ARIMA (6,0,1)**
+  - *Omoschedasticità*
+    - Breusch-Pagan test: 0.7741
+    - White test: 0.2053
+  - *Stazionarietà*
+    - Dickey-Fuller test: < 0.01
+    - Kpss test: > 0.1
+  - *Non correlazione*
+    - Ljung-Box test: 0.9959
+
+- **ARIMA (1,0,0)**
+  - *Omoschedasticità*
+    - Breusch-Pagan test: 0.9317
+    - White test: 0.1918
+  - *Stazionarietà*
+    - Dickey-Fuller test: < 0.01
+    - Kpss test: > 0.1
+  - *Non correlazione*
+    - Ljung-Box test: 0.1742
+
+In tutti i casi si ottiene un p-value elevato per il *BP test* indicando quindi l'omoschedasticità dei residui dei tre modelli. L'elevato p-value del *LB test* non ci permette di rigettare l'ipotesi nulla di residui generati da rumore bianco. Infine, il p-value basso del *ADF test* sta a indicare che i residui possono essere considerati stazionari con un livello di confidenza dell'1%, mentre il *KPSS test*, che restiuisce un valore del p-value maggiore di 0.05, indica che l'ipotesi nulla di stazionarietà non è rigettabile.
+
+Si continuerà l'analisi utilizzando il modello **ARIMA (4,0,6)** essendo quello che resituisce valori migliori dei residui in termini di *Omoschedasticità* *Stazionarietà* e *non correlazione*, lasciando supporre che è quindi il modello in grado di descrivere in maniera migliore il *remainder STL*.
+Equazione del modello: $X_t =Φ_1X_{t−1}+Φ_2X_{t−2}+...+Φ_4X_{t−4}−Θ_1W_{t−1}−Θ_2W_{t−2}−...−Θ_6W_{t−6}+ W_ t$
+```{r}
+y <- y_BCT_log_STL_def_win_dcmp_ts$remainder
+AUTOARIMA_y_AIC <- arima(y, order=c(4,0,6), include.mean=FALSE, method="CSS-ML")
+autoplot(ts(fitted(AUTOARIMA_y_AIC) , start=c(2009, 01), end=c(2021, 11), frequency = 12), series= "arima") +
+  autolayer(ts(y_BCT_log_STL_remainder , start=c(2009, 01), end=c(2021, 11), frequency = 12), series="remainder") +
+  xlab("Month") + ylab("rem") +
+  ggtitle("Remainder Toyota Camry") +
+  guides(colour=guide_legend(title="Legend"))
+```
+Per completezza vediamo anche gli autocorrelorammi.
+```{r}
+Data_df <- Camry_TrnS_df
+y <- resid(AUTOARIMA_y_AIC)
+#class(y)
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality)
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Aut_Fun_y <- acf(y, lag.max=maxlag, type="correlation", plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Aut_Fun_y <- data.frame(lag=Aut_Fun_y$lag, acf=Aut_Fun_y$acf)
+First_Date <- paste(Data_df$Month[1],Data_df$Year[1])
+Last_Date <- paste(Data_df$Month[T],Data_df$Year[T])
+title_content <- bquote(atop("Autocorrelogram of the Residuals of the ARIMA model for the Remainders in the STL Decomp. for the Log Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+
+ggplot(Plot_Aut_Fun_y, aes(x=lag, y=acf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=acf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="acf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="green", CI_95="blue", CI_99="red")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=8), 
+        plot.subtitle=element_text(hjust= 0.5, size=7.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+```{r}
+# The partial autocorrelogram of the remainders
+Data_df <- Camry_TrnS_df
+y <- AUTOARIMA_y_AIC[["residuals"]]
+T <- length(y)
+# maxlag <- ceiling(10*log10(T))    # Default
+# maxlag <- ceiling(sqrt(n)+45)     # Box-Jenkins
+maxlag <- ceiling(min(10, T/4))     # Hyndman (for data without seasonality)
+# maxlag <- ceiling(min(2*12, T/5)) # Hyndman (for data with seasonality) 
+# https://robjhyndman.com/hyndsight/ljung-box-test/
+Part_Aut_Fun_y <- pacf(y, lag.max=maxlag, plot=FALSE)
+ci_90 <- qnorm((1+0.90)/2)/sqrt(T)
+ci_95 <- qnorm((1+0.95)/2)/sqrt(T)
+ci_99 <- qnorm((1+0.99)/2)/sqrt(T)
+Plot_Part_Aut_Fun_y <- data.frame(lag=Part_Aut_Fun_y$lag, pacf=Part_Aut_Fun_y$acf)
+title_content <- bquote(atop("Partial Autocorrelogram of the Residuals of the ARIMA model for the Remainders in the STL Decomp. for the Log Box-Cox Transf. of the Training Set from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Path length ", .(T), " sample points. Lags ", .(maxlag)))
+caption_content <- "Author: Matteo Chiacchia"
+x_name <- bquote("lags")
+x_breaks_num <- maxlag
+x_binwidth <- 1
+x_breaks <- Part_Aut_Fun_y$lag
+x_labs <- format(x_breaks, scientific=FALSE)
+ggplot(Plot_Part_Aut_Fun_y, aes(x=lag, y=pacf))+
+  geom_segment(aes(x=lag, y=rep(0,length(lag)), xend=lag, yend=pacf), linewidth=1, col="black") +
+  # geom_col(mapping=NULL, data=NULL, position="dodge", width=0.1, col="black", inherit.aes=TRUE)+
+  geom_hline(aes(yintercept=-ci_90, color="CI_90"), show.legend=TRUE, lty=3) +
+  geom_hline(aes(yintercept=ci_90, color="CI_90"), lty=3) +
+  geom_hline(aes(yintercept=ci_95, color="CI_95"), show.legend=TRUE, lty=4)+
+  geom_hline(aes(yintercept=-ci_95, color="CI_95"), lty=4) +
+  geom_hline(aes(yintercept=-ci_99, color="CI_99"), show.legend=TRUE, lty=4) +
+  geom_hline(aes(yintercept=ci_99, color="CI_99"), lty=4) +
+  scale_x_continuous(name="lag", breaks=x_breaks, label=x_labs) +
+  scale_y_continuous(name="pacf value", breaks=waiver(), labels=NULL,
+                     sec.axis=sec_axis(~., breaks=waiver(), labels=waiver())) +
+  scale_color_manual(name="Conf. Inter.", labels=c("90%","95%","99%"),
+                     values=c(CI_90="red", CI_95="blue", CI_99="green")) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  theme(plot.title=element_text(hjust=0.5, size=8), 
+        plot.subtitle=element_text(hjust= 0.5, size=8.5),
+        plot.caption=element_text(hjust=1.0),
+        legend.key.width=unit(0.8,"cm"), legend.position="bottom")
+```
+Il numero di picchi corrispondenti ai lags positivi che attraversano le linee di confidenza è nullo.  confermando il risultato ottenuto dal
+*LB test*.
+
+**COVID-19**: La pandemia di *COVID-19* ha causato una serie di cambiamenti nell'economia, nella società e nella vita quotidiana delle persone. Ciò ha comportato una serie di conseguenze che possono influenzare i modelli delle *time series*. Ad esempio, le chiusure forzate delle attività economiche, le interruzioni nella catena di approvvigionamento e le fluttuazioni nei comportamenti di spesa dei consumatori possono influire sui dati che alimentano questi modelli.
+
+Modificare il valore del *noise* di un modello di *time series* può aiutare a tener conto di queste fluttuazioni impreviste e delle incertezze causate dalla pandemia. Ciò può essere particolarmente importante per la previsione della domanda di mercato, per la valutazione delle risorse finanziarie necessarie e per la pianificazione a lungo termine. Tuttavia, la modifica del valore del *noise* deve essere supportata da una solida analisi dei dati e della situazione attuale per garantire che le previsioni siano il più accurate possibile.
+
+Secondo i dati dell'*Associazione Nazionale dei Rivenditori di Auto (NADA)*, le vendite di auto negli Stati Uniti sono diminuite del 14,6% nel 2020 rispetto all'anno precedente, con un totale di circa 14,5 milioni di auto vendute rispetto ai 17 milioni di auto vendute nel 2019.
+
+La pandemia ha avuto un impatto significativo sul settore automobilistico degli *Stati Uniti*, con molte fabbriche e concessionarie che hanno chiuso temporaneamente durante la prima ondata della pandemia. Inoltre, la situazione economica incerta ha portato molti consumatori a posticipare l'acquisto di un'auto o a optare per opzioni di trasporto alternative come il car sharing o il bike sharing.
+
+Tuttavia, le vendite di auto negli Stati Uniti hanno mostrato una ripresa nella seconda metà del 2020.
+Vediamo adesso il *lineplot* relativo ai residui del modello *ARIMA*.
+```{r}
+autoplot( AUTOARIMA_y_AIC[["residuals"]])
+```
+Dal *lineplot* si nota immediatamente la presenza di un valore anomalo.
+Per poter trattare meglio, quindi, il *noise* e poter effettivamente affermare di avere un rumore che non dipende da nessuna causa esterna, modifichiamo il valore di picco più basso tramite un'*interpolazione lineare*.
+```{r}
+Camry_TrnS_df <- add_column(Camry_TrnS_df, stl_residuals=AUTOARIMA_y_AIC[["residuals"]])
+#Covid value modify
+y <- AUTOARIMA_y_AIC[["residuals"]]
+min_covid <- min(y)
+min_covid_index <- which.min(y)
+month_year_min_covid = sprintf("%s/%s", Camry_TrnS_df$Month[min_covid_index], Camry_TrnS_df$Year[min_covid_index])
+cat(month_year_min_covid)
+y[y == min_covid] <- 0
+y[min_covid_index] <- ((y[min_covid_index+1] -  y[min_covid_index-1]) / 2) +  y[min_covid_index-1]
+y_rem_ARIMA_residuals <- y
+```
+Una volta modificato il valore relativo al crollo delle vendite a causa della pandemia del COVID-19, si procede con l'analisi dei residui, cercando di verificare quale possa essere la distribuzione generatrice.
+
+Per ottenere informazioni sulla distribuzione che meglio rappresenta i residui del modello ARMA, possiamo considerare il grafico di **Cullen-Frey** della *skewness* e della *kurtosis* dei dati. 
+```{r}
+y <- as.vector(y_rem_ARIMA_residuals)
+descdist(y, discrete=FALSE, method="sample", graph=TRUE, boot=1000)
+```
+Nel grafico il punto blu rappresenta la coppia *skewness-kurtosis* dei dati osservati (cioè la *skewness* e la *kurtosis* dei residui del modello *ARMA*), e i punti arancioni rappresentano le coppie skewness-kurtosis di 1000 campionamenti dei dati osservati ottenuti con il metodo del *bootstrap.* Sul grafico sono riportati con diversi simboli e linee (come spiegato nella legenda) la *skewness* e la *kurtosis* di alcune distribuzioni note, come la normale, la gamma, l'uniforme, ecc. I punti di bootstrap sono vicini alle distribuzioni *logistica* e *T-Student*. Pertanto, queste due distribuzioni potrebbero essere testate per valutare quale meglio rappresenti i dati.
+Calcoliamo anche i valori di *skewness* e *kurtosis* con relativi intervalli di confidenza.
+```{r}
+y <- y_rem_ARIMA_residuals
+y_skew <- DescTools::Skew(y, weights=NULL, na.rm=TRUE, method=2, conf.level=0.90, ci.type="bca", R=1000) 
+show(y_skew)
+```
+```{r}
+y <- y_rem_ARIMA_residuals
+y_kurt <- DescTools::Kurt(y, weights=NULL, na.rm=TRUE, method=2, conf.level=0.90, ci.type="bca", R=1000) 
+show(y_kurt)
+```
+Notiamo che la *skewness* nulla ricade all'interno dell'intervallo di confidenza del 90%, possiamo quindi supporre che i residui abbiano una distribuzione simmetrica.
+Per quanto riguarda la *kurtosis* possiamo supporre che la distribuzione sia leptocurtica ma non può essere una distribuzione logistica essendo il valore del suo eccesso di *kurtosis* ($\frac{6}{5}$) non rientrante all'interno dell'intervallo di confidenza calcolato.
+
+Eseguiamo inoltre i test di *gaussianità*:
+
+- *Shapiro-Wilks*
+- *D'Agostino-Pearson*
+- *Anderson-Darling*
+- *Jarque-Bera*
+
+```{r}
+# Shapiro-Wilks (*SW*) test.
+y <- y_rem_ARIMA_residuals
+y_SW <- shapiro.test(y)
+show(y_SW)
+# D'Agostino Pearson (*DP*) test.
+y <- y_rem_ARIMA_residuals
+y_DP <- dagoTest(y)
+show(y_DP)
+# Anderson-Darling (AD) test.
+y <- y_rem_ARIMA_residuals
+y_AD <- ad.test(y)
+show(y_AD)
+# Jarque-Bera (*JB*) test.
+y <- y_rem_ARIMA_residuals
+y_JB <- jarque.bera.test(y)
+show(y_JB)
+```
+Tutti i test resituiscono un forte rigetto dell'ipotesi nulla di gaussianità.
+
+Si passa, quindi, alla stima dei parametri della distribuzione  *T-Student*
+Preliminarmente effettuiamo le seguenti operazioni:
+
+- Standardizziamo i residui ovvero trasformarli in modo che abbiano media zero e deviazione standard pari a uno
+- Calcoliamo i quantili empirici ovvero identifichiamo i valori che dividono la distribuzione dei residui in percentuali uguali.
+- Calcoliamo la distribuzione empirica ovvero una stima della distribuzione reale dei residui.
+- Calcoliamo la probabilità empirica.
+
+Ciò verrà usato per confrontare le caratteristiche della distribuzione empirica dei residui con le caratteristiche dela distribuzione che stimeremo li abbia generati.
+```{r}
+z <- as.vector(y_rem_ARIMA_residuals)
+z_st <- (1/sd(z))*as.vector(z-mean(z)) # We standardize the residuals of the ARIMA model.
+z_st_qemp <- qemp(ppoints(z_st), z_st) # The empirical quantiles of the residuals.
+z_st_demp <- demp(z_st_qemp, z_st)     # The empirical probability density of the residuals.
+z_st_pemp <- pemp(z_st_qemp, z_st)     # The empirical probability distribution of the residuals.  
+x <- z_st_qemp
+y_d <- z_st_demp
+y_p <- z_st_pemp
+hist(z_st, col="cyan", border="black", xlim=c(x[1]-1.0, x[length(x)]+1.0), ylim=c(0, y_d[length(y)]+0.75), 
+     freq=FALSE, main="Density Histogram and Empirical Density Function of the Standardized Residuals of the 
+     ARIMA model", 
+     xlab="Standardized Residuals", ylab="Histogram Values+Density Function")
+lines(x, y_d, lwd=2, col="darkblue")
+```
+Definiamo l'adattamento a una *Student*.
+Per procedere definiamo ora le funzioni caratteristiche di una Student generalizzata, non disponibili sulle librerie di R, ma costruibili a partire da trasformazioni standard delle funzioni analoghe della distribuzione standard di Student disponibili su R:
+
+- La funzione *dt_ls* restituisce il valore della funzione di densità di probabilità della distribuzione generalizzata di Student a partire dalla densità dt della distribuzione di *Student Standard*
+- La funzione *pt_ls* restituisce il valore della funzione di densità cumulativa della distribuzione generalizzata di Student a partire dalla densità cumulata pt della distribuzione di *Student Standard*
+- La funzione *qt_ls* restituisce il valore della funzione di densità cumulativa inversa della distribuzione generalizzata di Student a partire dalla densità cumulata inversa qt della distribuzione di *Student Standard*
+- La funzione *rt_ls* genera un vettore di variabili casuali distribuiti secondo la distribuzione generalizzata di Student a partire da un vettore di variabili casuali che seguono la distribuzione di *Student Standard*
+
+L’introduzione di queste funzioni consente di stimare i parametri della ipotetica distribuzione generalizzata di *Student* che genera i residui mediante la funzione fitdistr della libreria MASS.
+```{r}
+dt_ls <- function(x, m, s, df)	1/s*dt((x-m)/s, df)
+pt_ls <- function(q, m, s, df)  pt((q-m)/s, df)
+qt_ls <- function(p, m, s, df)  qt(p, df)*s+m
+rt_ls <- function(n, m, s, df)  rt(n,df)*s+m
+```
+In questo caso, il parametro di *location* m coincide con la media della distribuzione *Student* generalizzata, ma il parametro di *scale* s è dato da s= $\sigma\sqrt{\frac{df-2}{df}}$ dove $\sigma$ è il parametro di deviazione standard della distribuzione. Pertanto, poiché assumiamo come punto di partenza *df=3*, la scelta naturale per il parametro di *locaction* è *m=0* e per il parametro di *scale* è s=$\sqrt{\frac{1}{3}}$.
+```{r}
+fitdist_t_ls <- fitdist(z_st, "t_ls", start=list(m=0, s=sqrt(1/3), df=3), method="mle")
+fitdist_t_ls_m <- as.numeric(fitdist_t_ls$estimate[1])
+fitdist_t_ls_s <- as.numeric(fitdist_t_ls$estimate[2])
+fitdist_t_ls_df <- as.numeric(fitdist_t_ls$estimate[3])
+summary(fitdist_t_ls)
+```
+Si traccia il grafico della densità stimata della Student generalizzata insieme all'istogramma e alla densità empirica.
+```{r}
+hist(z_st, col="green", border="black", xlim=c(x[1]-2.0, x[length(x)]+2.0), ylim=c(0, y_d[length(y_d)]+0.75), 
+     freq=FALSE, main="Density Histogram of the Standardized Residuals of the ARIMA model+Empirical 
+     Density+Estimated Generalized Student Density", xlab="Standardized Residuals", ylab="Density")
+lines(density(z_st), lwd=2, col="darkgreen")
+lines(x, dt_ls(x, m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df), lwd=2, col="blue")
+legend("topleft", legend=c("Empirical Density", "Estimated Density"), col=c("darkgreen", "blue"), 
+       lty=1, lwd=0.1, cex=0.8, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0,
+       inset=-0.01, bty="n")
+```
+Si traccia il grafico *CDF (cumulative distribution function)* per confrontare la funzione di distribuzione cumulativa empirica con quella stimata dalla distribuzione di probabilità di *Student.* Questo permette di valutare se la distribuzione di probabilità stimata si adatta bene ai dati empirici.
+```{r}
+cdfcomp(fitdist_t_ls)
+```
+Si tracciano anche *Q-Q plot* e *P-P plot*. 
+
+- Il grafico **Q-Q plot** confronta i quantili della distribuzione di probabilità empirica con quelli della distribuzione teorica o stimata. Questo permette di valutare se le due distribuzioni sono simili o se differiscono significativamente tra loro. Se le due distribuzioni sono simili, i punti sul grafico *Q-Q plot* si adatteranno a una retta diagonale. Se le due distribuzioni differiscono, i punti sul grafico Q-Q plot si discosteranno dalla retta diagonale.
+
+- Il grafico **P-P plot** confronta le funzioni di distribuzione cumulativa della distribuzione di probabilità empirica con quella della distribuzione teorica o stimata. Anche in questo caso, se le due distribuzioni sono simili, i punti sul grafico P-P plot si adatteranno a una retta diagonale. Se le due distribuzioni differiscono, i punti sul grafico P-P plot si discosteranno dalla retta diagonale.
+
+In generale, i grafici *Q-Q plot* e *P-P plot* vengono utilizzati per valutare la bontà di adattamento di una distribuzione teorica o stimata ai dati empirici. Se le due distribuzioni sono simili, la distribuzione teorica o stimata può essere considerata un buon modello per i dati. Se le due distribuzioni differiscono significativamente, è necessario considerare l'utilizzo di un modello diverso o di modificare i parametri del modello.
+```{r}
+par(mfrow=c(1,2))
+qqcomp(fitdist_t_ls)
+ppcomp(fitdist_t_ls)
+par(mfrow=c(1,1))
+```
+Si traccia anche un *Q-Q plot* più dettagliato.
+```{r}
+x <- z_st_qemp
+fitdist_t_ls_m <- as.numeric(fitdist_t_ls$estimate[1])
+fitdist_t_ls_s <- as.numeric(fitdist_t_ls$estimate[2])
+fitdist_t_ls_df <- as.numeric(fitdist_t_ls$estimate[3])
+car::qqPlot(x, distribution ="t_ls", m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df,
+            line="robust", 
+            col=carPalette()[2], col.lines=carPalette()[8],
+            pch=16, cex=0.5, las=1,
+            main=bquote(atop("QQ-plot of the Standardized Residuals of the ARIMA Model for the Detrended and Deseasonalized Component",
+                             paste("of the Box-Cox Transformation of the Monthly Toyota Camry Sales Time Series Against the Generalized Student Distribution with Location ", .(fitdist_t_ls_m),", Scale ", .(fitdist_t_ls_s),", and Degrees of Freedom ", .(fitdist_t_ls_df),"."))),
+            xlab=bquote(paste("Theoretical Quantiles of the Generalized Student Distribution")), 
+            ylab="Quantiles of the Empirical Distribution of the Residuals")
+# adding the interquartile line, corresponding to the option "quartiles" of the parameter line.
+probs <- c(0.25,0.75)
+quant_x <- as.vector(quantile(x, probs))
+quant_t <- qt_ls(probs, m=fitdist_t_ls_m, s=fitdist_t_ls_s, df=fitdist_t_ls_df)
+slope <- diff(quant_x)/diff(quant_t)
+int <- quant_x[1]-slope*quant_t[1]
+abline(a=int, b=slope, col="black", lwd=1)
+# adding the first bisector of the axis line, corresponding to the option "0-1" of the parameter qq.line.type.
+abline(a=0, b=1, col="green", lwd=1)
+legend("topleft",
+       legend=c("robust regression line", "interquartile line", "y=x line"),
+       col=c("red", "black", "green"),
+       lty=1, lwd=0.1,
+       cex=0.80, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1,
+       inset=-0.01, bty="n")
+```
+Adesso l'idea è eseguire il *bootstrapping* per stimare l'incertezza nei parametri adattati.
+
+Innanzitutto, adattiamo una distribuzione t di *Student* con media zero al dataset standardizzato *z_st*.
+
+Successivamente, si utilizza la funzione *bootdist* per generare 1.000 campioni *bootstrap* della distribuzione adattata e stimare l'incertezza nelle stime dei parametri. Si estrae il valore mediano delle stime dei parametri dai campioni bootstrap e si arrotondano, salvandoli nella variabile *student_zero_mean_params*.
+```{r}
+fitdist_t_ls_zero_mean <- fitdist(z_st, "t_ls", start=list(s=sqrt(1/3), df=3), method="mle", fix.arg=list(m=0))
+summary(fitdist_t_ls_zero_mean)
+# Again, the *bootdist* function the library *fitdistrplus* allows to evaluate the uncertainty in estimated parameters of the fitted distribution.
+fitdist_t_ls_zero_mean_bd <- bootdist(fitdist_t_ls_zero_mean, niter=1000)
+summary(fitdist_t_ls_zero_mean_bd)
+# In this case we extract and round directly the median value of the parameters till the 2th decimal digit. 
+fitdist_t_ls_zero_mean_bd_med <- c(median(fitdist_t_ls_zero_mean_bd$estim$s), median(fitdist_t_ls_zero_mean_bd$estim$df))
+show(fitdist_t_ls_zero_mean_bd_med)
+student_zero_mean_params <- round(fitdist_t_ls_zero_mean_bd_med, 2)
+show(student_zero_mean_params)
+```
+Si utilizzano, quindi, i seguenti test per valutare la bontà di adattamento della distribuzione di probabilità stimata:
+
+- *Kolmogorov-Smirnov test*
+- *Cramer-Von Mises test*
+- *Anderson-Darling test*
+
+**Kolmogorov-Smirnov test**
+```{r}
+# The Kolmogorov-Smirnov test in the library *stats*
+KS_x_st_t_ls <- ks.test(x, y="pt_ls", m=0, s=student_zero_mean_params[1], df=student_zero_mean_params[2], alternative="two.sided")
+show(KS_x_st_t_ls)
+```
+**Cramer-Von Mises test**
+```{r}
+# The Cramer-Von Mises test in the library *goftest*.
+# This function performs the Cramer-Von Mises test of goodness-of-fit to the distribution specified by the 
+# argument null. It is assumed that the values in x are independent and identically distributed random values, 
+# with some cumulative distribution function F. The null hypothesis is that F is the function specified by the 
+# argument null, while the alternative hypothesis is that F is some other function.
+CVM_x_st_t_ls <- cvm.test(z_st, null="pt_ls", m=0, s=student_zero_mean_params[1], df=student_zero_mean_params[2], estimated=FALSE)
+show(CVM_x_st_t_ls)
+```
+**Anderson-Darling test**
+```{r}
+# The Anderson-Darling test in the library *goftest*.
+AD_x_st_t_ls <- ad.test(z_st, "pt_ls", m=0, s=student_zero_mean_params[1], df=student_zero_mean_params[2], estimated=FALSE)
+show(AD_x_st_t_ls)
+```
+Dai *p-values* ottenuti si nota che la distribuzione di *Student* stimata si adatta abbastanza bene ai dati, di conseguenza si utilizzerà per la creazione degli intervalli di confidenza.
+
+### 2. Forecast
+
+Per eseguire il *forecast* del modello eseguiamo le predizioni su ogni singola componente (*remainder*, *trend*, *seasonality*) per poi unirle in maniera additiva.
+Si calcolano inoltre le bande di predizione (80% e 90%) del rumore.
+
+#### Remainder forecast
+
+Per effettuare la predizione del *remainder* si utilizza il modello *ARIMA* trovato in precedenza. Le bande di predizione, invece, vengono calcolate mediante l'utilizzo dei quantili della distribuzione di *Student* al 5%, 20%, 80%, 95% moltiplicati per lo *standard error* della previsione del modello *ARIMA*. 
+Il quantile rappresenta il valore al quale la probabilità cumulativa della distribuzione è uguale al livello di confidenza desiderato.
+
+L'errore standard della previsione rappresenta la deviazione standard dell'errore di previsione del modello *ARIMA.* In altre parole, rappresenta la misura della dispersione dei dati intorno alla linea di previsione.
+
+Moltiplicando il quantile della distribuzione di *Student* per l'errore standard della previsione, si ottiene una stima dell'ampiezza dell'intervallo di confidenza per la previsione. Questo viene quindi sommato alla previsione media per ottenere le bande inferiori e superiori della previsione al livello di confidenza desiderato.
+```{r}
+y <- y_BCT_log_STL_remainder
+AUTOARIMA_y_AIC <- arima(y, order=c(4,0,6), include.mean=FALSE, method="CSS-ML")
+AUTOARIMA_y_AIC_pred <- predict(AUTOARIMA_y_AIC, n.ahead = TstS_length)
+y_rem_pred_for <- forecast::forecast(AUTOARIMA_y_AIC, h=TstS_length, level = c(80, 95), bootstrap = TRUE)
+autoplot(y_rem_pred_for)
+y_rem_pred_for_mean <- y_rem_pred_for[["mean"]]
+y_res_log_pred_RH_for_080_low_int <- (y_rem_pred_for_mean
+                                       +qt_ls(0.20, m=0, s=student_zero_mean_params[1], 
+                                             df=student_zero_mean_params[2])*AUTOARIMA_y_AIC_pred$se)
+
+y_res_log_pred_RH_for_080_upp_int <- (y_rem_pred_for_mean
+                                       +qt_ls(0.80, m=0, s=student_zero_mean_params[1],
+                                             df=student_zero_mean_params[2])*AUTOARIMA_y_AIC_pred$se)
+
+y_res_log_pred_RH_for_095_low_int <- (y_rem_pred_for_mean
+                                       +qt_ls(0.05, m=0, s=student_zero_mean_params[1],
+                                             df=student_zero_mean_params[2])*AUTOARIMA_y_AIC_pred$se)
+y_res_log_pred_RH_for_095_upp_int <- (y_rem_pred_for_mean
+                                       +qt_ls(0.95, m=0, s=student_zero_mean_params[1],
+                                             df=student_zero_mean_params[2])*AUTOARIMA_y_AIC_pred$se)
+```
+Si visualizza inzialmente la funzione di *previsione* che utilizza il metodo *random walk* e calcola autmatica gli intervalli di confidenza.
+```{r}
+sales_log <- as.vector(log(df$sales))
+sales_log_test <- sales_log[c((TrnS_length+1):(TrnS_length+TstS_length))]
+sales_log_stl <- stl(Camry_TrnS_ts, s.window=11, t.window = 29, robust = TRUE)
+sales_log_stl_for <- forecast::forecast(sales_log_stl, h=TstS_length, method="naive", level=c(80,95))
+plot(sales_log_stl_for)
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), serie ="Toyota Camry path") +
+  autolayer(ts(sales_log_stl_for[["mean"]], start=c(2021, 12), end=c(2022, 11), frequency = 12), series="Forecast with stl func") +
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecast Toyota Camry sales") +
+  guides(colour=guide_legend(title="Legend"))
+```
+#### Trend forecast
+
+Per effettuare il forecast del *trend* si è ricorso a vari metodi:
+
+- *Naive forecast*
+- *Holt Winters forecast*
+- *Gran mean forecast*
+
+##### Naive forecast
+La tecnica di *forecast naive* o *random walk* è un semplice metodo di previsione delle serie temporali che assume che il valore futuro di una serie temporale sarà lo stesso del valore più recente osservato. Di conseguenza si considera come *trend* futuro il continuo costante dell'ultimo valore del *trend*. 
+```{r}
+TS_length <- TrnS_length+TstS_length
+y <- y_BCT_log_STL_def_win_dcmp_ts$trend
+y_trend_naive_pred <- rep(y[length(y)],TstS_length)
+y_trend_naive_for <- c(y, y_trend_naive_pred)
+x <- as.Date(df$date)
+y <- y_trend_naive_for
+plot(x[1:TrnS_length],y[1:TrnS_length], type="l", lty = 1, lwd=1.0, col="black", xaxt = "n", 
+     xlim=c(as.Date(df$date)[1],as.Date(df$date)[TS_length]),
+     xlab="", ylab="Trend", 
+     main="Naive Forecast of the Trend Component of the STL Decomposition of the Log Box-Cox Transformation",
+     cex.main=0.95)
+lines(x[TrnS_length:TS_length], y[TrnS_length:TS_length], type="l", lty = 1, lwd=1.5, col="blue")
+axis(1, at=x[c(seq(1,TS_length,by=6),TS_length)], labels=format(x[c(seq(1,TS_length,by=6),TS_length)], "%Y %m"),
+     tick=TRUE, cex.axis = .5)
+legend("topright", inset=c(0.05,0.0), legend=c("Trend Component", "Naive Forecast"), col=c("black", "blue"),
+       lty=1, lwd=0.1, cex=0.7, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0, 
+       bty="n")
+```
+##### Holt-Winters forecast
+
+*Holt Winters linear trend method* è una tecnica di previsione delle serie temporali che utilizza un modello lineare per la componente del *trend*.
+Per il *trend*, il metodo di *Holt-Winters*  utilizza un modello di regressione lineare per stimare il trend futuro. In particolare, l'equazione del trend lineare è espressa come:
+
+$T(t+1) = T(t) + b$
+
+dove $T(t+1)$ rappresenta la previsione del trend per il periodo successivo, $T(t)$ rappresenta il trend attuale e b rappresenta la pendenza della linea di trend.
+```{r}
+y <- y_BCT_log_STL_def_win_dcmp_ts$trend
+y_trend_HW_pred <- holt(y, h=TstS_length)
+y_trend_HW_pred_mean <- as.numeric(y_trend_HW_pred$mean)
+y_trend_HW_for <- c(y,y_trend_HW_pred_mean)
+x <- as.Date(df$date)
+y <- y_trend_HW_for
+plot(x[1:TrnS_length],y[1:TrnS_length], type="l", col="black", xaxt = "n", 
+     xlim=c(as.Date(df$date)[1],as.Date(df$date)[TS_length]),
+     xlab="", ylab="Trend", 
+    main="Holt Winters Forecast of the Trend Component of the STL Decomposition of the Log Box-Cox Transformation",
+    cex.main=0.95)
+lines(x[TrnS_length:TS_length], y[TrnS_length:TS_length], type="l", lty = 1, lwd=1.5, col="blue")
+axis(1, at=x[c(seq(1,TS_length,by=6),TS_length)], labels=format(x[c(seq(1,TS_length,by=6),TS_length)], "%Y %m"),
+     tick=TRUE, cex.axis = .5)
+legend("topright", inset=c(0.06,0.0), legend=c("Trend Component", "Holt Winter Forecast"), col=c("black", "blue"), lty=1, 
+       lwd=0.1, cex=0.7, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0, bty="n")
+```
+##### Gran Mean forecast
+
+La terza tecnica consiste nel considerare la gran media della componente di *trend*, che è la media della componente di trend del *train set* continuata in maniera costante per tutta la lunghezza del *Test set*.
+```{r}
+y <- y_BCT_log_STL_def_win_dcmp_ts$trend
+y_gran_mean_pred <- rep(mean(y),TstS_length)
+y_gran_mean_for <- c(y, rep(mean(y),TstS_length))
+tail(y_gran_mean_for,30)
+x <- as.Date(df$date)
+y <- y_gran_mean_for
+plot(x[1:TrnS_length],y[1:TrnS_length], type="l", col="black", xaxt = "n", 
+     xlim=c(as.Date(df$date)[1],as.Date(df$date)[TS_length]),
+     xlab="", ylab="Trend", 
+    main="Holt Winter Forecast of the Trend Component of the STL Decomposition of the Log Box-Cox Transformation",
+    cex.main=0.95)
+lines(x[TrnS_length:TS_length], y[TrnS_length:TS_length], type="l", lty = 1, lwd=1.5, col="blue")
+axis(1, at=x[c(seq(1,TS_length,by=6),TS_length)], labels=format(x[c(seq(1,TS_length,by=6),TS_length)], "%Y %m"),
+     tick=TRUE, cex.axis = .5)
+legend("topright", inset=c(0.06,0.0), legend=c("Trend Component", "Gran Mean Forecast"), col=c("black", "blue"), lty=1, 
+       lwd=0.1, cex=0.7, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0, bty="n")
+```
+#### Seasonality forecast
+
+Per simulare la componente stagionale per i prossimi 12 mesi è bastato prolungare la componente stagionale ripetendo per i mesi futuri i valori assunti nei mesi passati corrispondenti (*naive method*).
+```{r}
+y_seas <- y_BCT_log_STL_def_win_dcmp_ts$`season_1 year`
+y_seas_naive_pred <- c(y_seas[(length(y_seas)-11):length(y_seas)])
+y_seas_naive_for <- c(y_seas, y_seas_naive_pred)
+x <- as.Date(df$date)
+y <- y_seas_naive_for
+plot(x[1:TrnS_length],y[1:TrnS_length], type="l", col="black", xaxt = "n", xlab="", 
+     xlim=c(as.Date(df$date)[1],as.Date(df$date)[TS_length]),
+     ylab="Seasonal", 
+     main="Seasonal Naive Forecast of the Seasonal Component of the STL Decomposition of the Log Box-Cox Transformation",
+     cex.main=0.95)
+lines(x[TrnS_length:TS_length], y[TrnS_length:TS_length], type="l", lty = 1, lwd=1.5, col="blue")
+axis(1, at=x[c(seq(1,TS_length,by=6),TS_length)], labels=format(x[c(seq(1,TS_length,by=6),TS_length)], "%Y %m"),
+     tick=TRUE, cex.axis = .5)
+legend("topright", inset=c(0.12,0.0), legend=c("Seasonal Component", "Seasonal Naive Forecast"), col=c("black", "blue"), lty=1, 
+       lwd=0.1, cex=0.7, x.intersp=0.50, y.intersp=0.40, text.width=2, seg.len=1, text.font=4, box.lty=0, bty="n")
+```
+
+#### Total forecast with *naive method*
+Una volta applicati i vari metodi di predizione, si procede unendo in maniera additiva i valori trovati e si utilizzeranno metriche di accuratezza per verificare quali tipi di predizioni restituiscono risultati migliori.
+
+Il primo *forecast* è ottenuto unendo "*naive trend method*" + "*naive seasonality method*" + "*arima(4,0,6) remainder*"
+```{r}
+#head(df)
+y_rem_pred_for_mean <- as.vector(y_rem_pred_for_mean)
+sales_log_naive_point_pred <- y_trend_naive_pred + y_seas_naive_pred + y_rem_pred_for_mean
+sales_log_naive_point_for <- c(sales_log[c(1:TrnS_length)], sales_log_naive_point_pred)
+y_log_naive_pred_RH_for_080_low_int <- y_trend_naive_pred + y_seas_naive_pred + y_res_log_pred_RH_for_080_low_int
+y_log_naive_pred_RH_for_080_upp_int <- y_trend_naive_pred + y_seas_naive_pred + y_res_log_pred_RH_for_080_upp_int
+y_log_naive_pred_RH_for_095_low_int <- y_trend_naive_pred + y_seas_naive_pred + y_res_log_pred_RH_for_095_low_int
+y_log_naive_pred_RH_for_095_upp_int <- y_trend_naive_pred + y_seas_naive_pred + y_res_log_pred_RH_for_095_upp_int
+
+sales_log_boot_080_low_naive_for_int <- c(rep(NA,TrnS_length),y_log_naive_pred_RH_for_080_low_int)
+sales_log_boot_080_upp_naive_for_int <- c(rep(NA,TrnS_length),y_log_naive_pred_RH_for_080_upp_int)
+sales_log_boot_095_low_naive_for_int <- c(rep(NA,TrnS_length),y_log_naive_pred_RH_for_095_low_int)
+sales_log_boot_095_upp_naive_for_int <- c(rep(NA,TrnS_length),y_log_naive_pred_RH_for_095_upp_int)
+
+sales_naive_pred_df <- add_column(df, sales_log=sales_log, 
+                                sales_log_naive_point_for=sales_log_naive_point_for,
+                                sales_log_boot_080_low_naive_for_int=sales_log_boot_080_low_naive_for_int, 
+                                sales_log_boot_080_upp_naive_for_int=sales_log_boot_080_upp_naive_for_int,
+                                sales_log_boot_095_low_naive_for_int=sales_log_boot_095_low_naive_for_int, 
+                                sales_log_boot_095_upp_naive_for_int=sales_log_boot_095_upp_naive_for_int,
+                                .after="sales")
+tail(sales_naive_pred_df, 20)
+```
+Viene inizialmente effettuato un plot in cui in cui viene messo a confronto il *path* reale dei dati con quello predetto utilizzando solo le medie delle predizioni.
+```{r}
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), serie ="Toyota Camry path") +
+  autolayer(ts(sales_log_naive_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="Forecast with naive trend") +
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecast Toyota Camry sales") +
+  guides(colour=guide_legend(title="Legend"))
+```
+Per poi passare a un plot più completo in cui sono presenti gli intervalli di predizione dati dallo studio dei residui del modello *ARMA*.
+```{r}
+Data_df <- sales_naive_pred_df
+length <- nrow(Data_df)
+T <- TrnS_length
+title_content <- bquote(atop("Line Plot of the Toyota Camry sales Training Set and Predicted Test Sets - from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Training set length ", .(TrnS_length), " sample points. Test set length ", .(TstS_length), " sample points."))
+caption_content <- ("Author: Matteo Chiacchia")
+x_name <- bquote("")
+# library(numbers)
+# primeFactors(T)
+x_breaks_num <- 33
+x_breaks_min <- Data_df$t[1]
+x_breaks_max <- Data_df$t[length]
+x_binwidth <- floor((x_breaks_max-x_breaks_min)/x_breaks_num)
+x_breaks <- seq(from=x_breaks_min, to=x_breaks_max, by=x_binwidth)
+if((x_breaks_max-max(x_breaks))>x_binwidth/2){x_breaks <- c(x_breaks,x_breaks_max)}
+x_labs <- paste(Data_df$Month[x_breaks],Data_df$Year[x_breaks])
+J <- 0
+x_lims <- c(x_breaks_min-J*x_binwidth, x_breaks_max+J*x_binwidth)
+y_name <- bquote("Sales")
+y_breaks_num <- 10
+y_max <- max(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_upp_naive_for_int))
+y_min <- min(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_low_naive_for_int))
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- floor(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+line_black   <- bquote("in-sample path")
+line_magenta <- bquote("real path")
+line_brown   <- bquote("predicted path")
+line_green   <- bquote("80% pred.int.")
+# line_blue    <- bquote("95% pred.int.")
+line_red     <- bquote("95% pred.int.")
+leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_red)
+leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_red")
+leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+                     "line_green"="green", "line_red"="red")
+# leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_blue, line_red)
+# leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_blue", "line_red")
+# leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+#                      "line_green"="green", "line_blue"="blue", "line_red"="red")
+fill_g <- bquote("90% pred. band")
+# fill_b <- bquote("95% pred. band")
+fill_r <- bquote("95% pred. band")
+fill_g <- bquote("90% pred. band")
+fill_b <- bquote("95% pred. band")
+fill_r <- bquote("99% pred. band")
+leg_fill_labs   <- c( fill_g, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_r"="orangered")
+leg_fill_labs   <- c( fill_g, fill_b, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_b", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_b"="blue", "fill_r"="orangered")
+leg_col_labs    <- leg_line_labs
+leg_col_breaks  <- leg_line_breaks
+leg_col_cols    <- leg_line_cols
+y_pred_lp <- ggplot(Data_df, aes(x=t)) + 
+  geom_line(data=subset(Data_df, Data_df$t <= t[T+1]), aes(y=sales_log, color="line_black"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log, color="line_magenta"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_naive_point_for , colour="line_brown"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_low_naive_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_upp_naive_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_low_naive_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_upp_naive_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_naive_for_int, ymax=sales_log_boot_095_upp_naive_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_naive_for_int, ymax=sales_log_boot_095_upp_naive_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_095_low_naive_for_int, ymax=sales_log_boot_080_low_naive_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_080_upp_naive_for_int, ymax=sales_log_boot_095_upp_naive_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="green",
+              aes(ymin=sales_log_boot_080_low_naive_for_int, ymax=sales_log_boot_080_upp_naive_for_int, fill="fill_g")) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  guides(linetype="none", shape="none") +
+  scale_colour_manual(name="Legend", labels=leg_line_labs, values=leg_line_cols, breaks=leg_line_breaks) +
+  scale_fill_manual(name="", labels=leg_fill_labs, values=leg_fill_cols, breaks=leg_fill_breaks) +
+  guides(colour=guide_legend(order=1), fill=guide_legend(order=2)) +
+  theme(plot.title=element_text(hjust = 0.5), 
+        plot.subtitle=element_text(hjust =  0.5),
+        plot.caption = element_text(hjust = 1.0),
+        axis.text.x = element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width = unit(0.8,"cm"), legend.position="bottom")
+plot(y_pred_lp)
+```
+#### Total forecast with *Holt Winters method*
+
+Il secondo *forecast* è ottenuto unendo "*Holt Winters trend method*" + "*naive seasonality method*" + "*arima(4,0,6) remainder*"
+```{r}
+#head(df)
+sales_log <- as.vector(log(df$sales))
+sales_log_test <- sales_log[c((TrnS_length+1):(TrnS_length+TstS_length))]
+y_rem_pred_for_mean <- as.vector(y_rem_pred_for_mean)
+sales_log_HW_point_pred <- y_trend_HW_pred_mean + y_seas_naive_pred + y_rem_pred_for_mean
+#show(sales_log_naive_point_pred)
+sales_log_HW_point_for <- c(sales_log[c(1:TrnS_length)], sales_log_HW_point_pred)
+y_log_HW_pred_RH_for_080_low_int <- y_trend_HW_pred_mean + y_seas_naive_pred  + y_res_log_pred_RH_for_080_low_int
+y_log_HW_pred_RH_for_080_upp_int <- y_trend_HW_pred_mean + y_seas_naive_pred  + y_res_log_pred_RH_for_080_upp_int
+y_log_HW_pred_RH_for_095_low_int <- y_trend_HW_pred_mean + y_seas_naive_pred  + y_res_log_pred_RH_for_095_low_int
+y_log_HW_pred_RH_for_095_upp_int <- y_trend_HW_pred_mean + y_seas_naive_pred  + y_res_log_pred_RH_for_095_upp_int
+
+sales_log_boot_080_low_HW_for_int <- c(rep(NA,TrnS_length),y_log_HW_pred_RH_for_080_low_int)
+sales_log_boot_080_upp_HW_for_int <- c(rep(NA,TrnS_length),y_log_HW_pred_RH_for_080_upp_int)
+sales_log_boot_095_low_HW_for_int <- c(rep(NA,TrnS_length),y_log_HW_pred_RH_for_095_low_int)
+sales_log_boot_095_upp_HW_for_int <- c(rep(NA,TrnS_length),y_log_HW_pred_RH_for_095_upp_int)
+
+sales_HW_pred_df <- add_column(df, sales_log=sales_log, 
+                                sales_log_HW_point_for=sales_log_HW_point_for,
+                                sales_log_boot_080_low_HW_for_int=sales_log_boot_080_low_HW_for_int, 
+                                sales_log_boot_080_upp_HW_for_int=sales_log_boot_080_upp_HW_for_int,
+                                sales_log_boot_095_low_HW_for_int=sales_log_boot_095_low_HW_for_int, 
+                                sales_log_boot_095_upp_HW_for_int=sales_log_boot_095_upp_HW_for_int,
+                                .after="sales")
+```
+
+Viene inizialmente effettuato un plot in cui in cui viene messo a confronto il *path* reale dei dati con quello predetto.
+```{r}
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), series= "Toyota Camry path") +
+  autolayer(ts(sales_log_HW_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="Forecast with HW trend") +
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecast Toyota Camry sales") +
+  guides(colour=guide_legend(title="Legend"))
+```
+Per poi passare a un plot più completo in cui sono presenti gli intervalli di predizione dati dallo studio dei residui del modello *ARMA*.
+```{r}
+Data_df <- sales_HW_pred_df
+length <- nrow(Data_df)
+T <- TrnS_length
+title_content <- bquote(atop("Line Plot of the Toyota Camry sales Training Set and Predicted Test Sets - from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Training set length ", .(TrnS_length), " sample points. Test set length ", .(TstS_length), " sample points."))
+caption_content <- ("Author: Matteo Chiacchia")
+x_name <- bquote("")
+# library(numbers)
+# primeFactors(T)
+x_breaks_num <- 33
+x_breaks_min <- Data_df$t[1]
+x_breaks_max <- Data_df$t[length]
+x_binwidth <- floor((x_breaks_max-x_breaks_min)/x_breaks_num)
+x_breaks <- seq(from=x_breaks_min, to=x_breaks_max, by=x_binwidth)
+if((x_breaks_max-max(x_breaks))>x_binwidth/2){x_breaks <- c(x_breaks,x_breaks_max)}
+x_labs <- paste(Data_df$Month[x_breaks],Data_df$Year[x_breaks])
+J <- 0
+x_lims <- c(x_breaks_min-J*x_binwidth, x_breaks_max+J*x_binwidth)
+y_name <- bquote("Sales")
+y_breaks_num <- 10
+y_max <- max(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_upp_HW_for_int))
+y_min <- min(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_low_HW_for_int))
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- floor(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+line_black   <- bquote("in-sample path")
+line_magenta <- bquote("real path")
+line_brown   <- bquote("predicted path")
+line_green   <- bquote("80% pred.int.")
+# line_blue    <- bquote("95% pred.int.")
+line_red     <- bquote("95% pred.int.")
+leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_red)
+leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_red")
+leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+                     "line_green"="green", "line_red"="red")
+# leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_blue, line_red)
+# leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_blue", "line_red")
+# leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+#                      "line_green"="green", "line_blue"="blue", "line_red"="red")
+fill_g <- bquote("90% pred. band")
+# fill_b <- bquote("95% pred. band")
+fill_r <- bquote("95% pred. band")
+fill_g <- bquote("90% pred. band")
+fill_b <- bquote("95% pred. band")
+fill_r <- bquote("99% pred. band")
+leg_fill_labs   <- c( fill_g, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_r"="orangered")
+leg_fill_labs   <- c( fill_g, fill_b, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_b", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_b"="blue", "fill_r"="orangered")
+leg_col_labs    <- leg_line_labs
+leg_col_breaks  <- leg_line_breaks
+leg_col_cols    <- leg_line_cols
+y_pred_lp <- ggplot(Data_df, aes(x=t)) + 
+  geom_line(data=subset(Data_df, Data_df$t <= t[T+1]), aes(y=sales_log, color="line_black"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log, color="line_magenta"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_HW_point_for , colour="line_brown"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_low_HW_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_upp_HW_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_low_HW_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_upp_HW_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_HW_for_int, ymax=sales_log_boot_095_upp_HW_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_HW_for_int, ymax=sales_log_boot_095_upp_HW_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_095_low_HW_for_int, ymax=sales_log_boot_080_low_HW_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_080_upp_HW_for_int, ymax=sales_log_boot_095_upp_HW_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="green",
+              aes(ymin=sales_log_boot_080_low_HW_for_int, ymax=sales_log_boot_080_upp_HW_for_int, fill="fill_g")) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  guides(linetype="none", shape="none") +
+  scale_colour_manual(name="Legend", labels=leg_line_labs, values=leg_line_cols, breaks=leg_line_breaks) +
+  scale_fill_manual(name="", labels=leg_fill_labs, values=leg_fill_cols, breaks=leg_fill_breaks) +
+  guides(colour=guide_legend(order=1), fill=guide_legend(order=2)) +
+  theme(plot.title=element_text(hjust = 0.5), 
+        plot.subtitle=element_text(hjust =  0.5),
+        plot.caption = element_text(hjust = 1.0),
+        axis.text.x = element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width = unit(0.8,"cm"), legend.position="bottom")
+plot(y_pred_lp)
+```
+#### Total forecast with *Gran Mean method*
+
+Il terzo *forecast* è ottenuto unendo "*Gran Mean trend method*" + "*naive seasonality method*" + "*arima(4,0,6) remainder*"
+```{r}
+#head(df)
+sales_log <- as.vector(log(df$sales))
+sales_log_test <- sales_log[c((TrnS_length+1):(TrnS_length+TstS_length))]
+y_rem_pred_for_mean <- as.vector(y_rem_pred_for_mean)
+sales_log_gran_mean_point_pred <- y_gran_mean_pred + y_seas_naive_pred + y_rem_pred_for_mean
+
+sales_log_gran_mean_point_for <- c(sales_log[c(1:TrnS_length)], sales_log_gran_mean_point_pred)
+y_log_gran_mean_pred_RH_for_080_low_int <- y_gran_mean_pred + y_seas_naive_pred  + y_res_log_pred_RH_for_080_low_int
+y_log_gran_mean_pred_RH_for_080_upp_int <- y_gran_mean_pred + y_seas_naive_pred  + y_res_log_pred_RH_for_080_upp_int
+y_log_gran_mean_pred_RH_for_095_low_int <- y_gran_mean_pred + y_seas_naive_pred  + y_res_log_pred_RH_for_095_low_int
+y_log_gran_mean_pred_RH_for_095_upp_int <- y_gran_mean_pred + y_seas_naive_pred  + y_res_log_pred_RH_for_095_upp_int
+
+sales_log_boot_080_low_gran_mean_for_int <- c(rep(NA,TrnS_length),y_log_gran_mean_pred_RH_for_080_low_int)
+sales_log_boot_080_upp_gran_mean_for_int <- c(rep(NA,TrnS_length),y_log_gran_mean_pred_RH_for_080_upp_int)
+sales_log_boot_095_low_gran_mean_for_int <- c(rep(NA,TrnS_length),y_log_gran_mean_pred_RH_for_095_low_int)
+sales_log_boot_095_upp_gran_mean_for_int <- c(rep(NA,TrnS_length),y_log_gran_mean_pred_RH_for_095_upp_int)
+
+sales_gran_mean_pred_df <- add_column(df, sales_log=sales_log, 
+                                sales_log_gran_mean_point_for=sales_log_gran_mean_point_for,
+                                sales_log_boot_080_low_gran_mean_for_int=sales_log_boot_080_low_gran_mean_for_int, 
+                                sales_log_boot_080_upp_gran_mean_for_int=sales_log_boot_080_upp_gran_mean_for_int,
+                                sales_log_boot_095_low_gran_mean_for_int=sales_log_boot_095_low_gran_mean_for_int, 
+                                sales_log_boot_095_upp_gran_mean_for_int=sales_log_boot_095_upp_gran_mean_for_int,
+                                .after="sales")
+```
+
+Viene inizialmente effettuato un plot in cui in cui viene messo a confronto il *path* reale dei dati con quello predetto.
+```{r}
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), series = "Toyota Camry real path") +
+  autolayer(ts(sales_log_gran_mean_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="Forecast with Gran-Mean trend") +
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecast Toyota Camry sales") +
+  guides(colour=guide_legend(title="Legend"))
+```
+Per poi passare a un plot più completo in cui sono presenti gli intervalli di predizione dati dallo studio dei residui del modello *ARMA*.
+```{r}
+Data_df <- sales_gran_mean_pred_df
+length <- nrow(Data_df)
+T <- TrnS_length
+title_content <- bquote(atop("Line Plot of the Toyota Camry sales Training Set and Predicted Test Sets - from ", .(First_Date), " to ", .(Last_Date)))
+subtitle_content <- bquote(paste("Training set length ", .(TrnS_length), " sample points. Test set length ", .(TstS_length), " sample points."))
+caption_content <- ("Author: Matteo Chiacchia")
+x_name <- bquote("")
+# library(numbers)
+# primeFactors(T)
+x_breaks_num <- 33
+x_breaks_min <- Data_df$t[1]
+x_breaks_max <- Data_df$t[length]
+x_binwidth <- floor((x_breaks_max-x_breaks_min)/x_breaks_num)
+x_breaks <- seq(from=x_breaks_min, to=x_breaks_max, by=x_binwidth)
+if((x_breaks_max-max(x_breaks))>x_binwidth/2){x_breaks <- c(x_breaks,x_breaks_max)}
+x_labs <- paste(Data_df$Month[x_breaks],Data_df$Year[x_breaks])
+J <- 0
+x_lims <- c(x_breaks_min-J*x_binwidth, x_breaks_max+J*x_binwidth)
+y_name <- bquote("Sales")
+y_breaks_num <- 10
+y_max <- max(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_upp_gran_mean_for_int))
+y_min <- min(na.omit(Data_df$sales_log),na.omit(Data_df$sales_log_boot_095_low_gran_mean_for_int))
+y_binwidth <- round((y_max-y_min)/y_breaks_num, digits=3)
+y_breaks_low <- floor(y_min/y_binwidth)*y_binwidth
+y_breaks_up <- ceiling(y_max/y_binwidth)*y_binwidth
+y_breaks <- round(seq(from=y_breaks_low, to=y_breaks_up, by=y_binwidth),digits=3)
+y_labs <- format(y_breaks, scientific=FALSE)
+K <- 0
+y_lims <- c((y_breaks_low-K*y_binwidth), (y_breaks_up+K*y_binwidth))
+line_black   <- bquote("in-sample path")
+line_magenta <- bquote("real path")
+line_brown   <- bquote("predicted path")
+line_green   <- bquote("80% pred.int.")
+# line_blue    <- bquote("95% pred.int.")
+line_red     <- bquote("95% pred.int.")
+leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_red)
+leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_red")
+leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+                     "line_green"="green", "line_red"="red")
+# leg_line_labs   <- c(line_black, line_brown, line_magenta, line_green, line_blue, line_red)
+# leg_line_breaks <- c("line_black", "line_brown", "line_magenta", "line_green", "line_blue", "line_red")
+# leg_line_cols   <- c("line_black"="black", "line_brown"="brown", "line_magenta"="magenta",
+#                      "line_green"="green", "line_blue"="blue", "line_red"="red")
+fill_g <- bquote("90% pred. band")
+# fill_b <- bquote("95% pred. band")
+fill_r <- bquote("95% pred. band")
+fill_g <- bquote("90% pred. band")
+fill_b <- bquote("95% pred. band")
+fill_r <- bquote("99% pred. band")
+leg_fill_labs   <- c( fill_g, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_r"="orangered")
+leg_fill_labs   <- c( fill_g, fill_b, fill_r)
+leg_fill_breaks <- c("fill_g", "fill_b", "fill_r")
+leg_fill_cols   <- c("fill_g"="lightgreen", "fill_b"="blue", "fill_r"="orangered")
+leg_col_labs    <- leg_line_labs
+leg_col_breaks  <- leg_line_breaks
+leg_col_cols    <- leg_line_cols
+y_pred_lp <- ggplot(Data_df, aes(x=t)) + 
+  geom_line(data=subset(Data_df, Data_df$t <= t[T+1]), aes(y=sales_log, color="line_black"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log, color="line_magenta"),
+            linetype="solid", alpha=1, size=0.3, group=1) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_gran_mean_point_for , colour="line_brown"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_low_gran_mean_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_095_upp_gran_mean_for_int, colour="line_red"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_low_gran_mean_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_line(data=subset(Data_df, Data_df$t >= t[T+1]), aes(y=sales_log_boot_080_upp_gran_mean_for_int, colour="line_green"),
+            linetype="solid", alpha=1, size=0.3) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_gran_mean_for_int, ymax=sales_log_boot_095_upp_gran_mean_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="orangered",
+              aes(ymin=sales_log_boot_095_low_gran_mean_for_int, ymax=sales_log_boot_095_upp_gran_mean_for_int, fill="fill_r")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_095_low_gran_mean_for_int, ymax=sales_log_boot_080_low_gran_mean_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="blue",
+              aes(ymin=sales_log_boot_080_upp_gran_mean_for_int, ymax=sales_log_boot_095_upp_gran_mean_for_int, fill="fill_b")) +
+  geom_ribbon(data=subset(Data_df, Data_df$t >= t[T+1]), alpha=0.3, colour="green",
+              aes(ymin=sales_log_boot_080_low_gran_mean_for_int, ymax=sales_log_boot_080_upp_gran_mean_for_int, fill="fill_g")) +
+  scale_x_continuous(name=x_name, breaks=x_breaks, labels=x_labs, limits=x_lims) +
+  scale_y_continuous(name=y_name, breaks=y_breaks, labels=NULL, limits=y_lims,
+                     sec.axis= sec_axis(~., breaks=y_breaks, labels=y_labs)) +
+  ggtitle(title_content) +
+  labs(subtitle=subtitle_content, caption=caption_content) +
+  guides(linetype="none", shape="none") +
+  scale_colour_manual(name="Legend", labels=leg_line_labs, values=leg_line_cols, breaks=leg_line_breaks) +
+  scale_fill_manual(name="", labels=leg_fill_labs, values=leg_fill_cols, breaks=leg_fill_breaks) +
+  guides(colour=guide_legend(order=1), fill=guide_legend(order=2)) +
+  theme(plot.title=element_text(hjust = 0.5), 
+        plot.subtitle=element_text(hjust =  0.5),
+        plot.caption = element_text(hjust = 1.0),
+        axis.text.x = element_text(angle=-45, vjust=1, hjust=-0.3),
+        legend.key.width = unit(0.8,"cm"), legend.position="bottom")
+plot(y_pred_lp)
+```
+### 3. Accuracy
+
+Una volta utilizzati i diversi metodi di *forecast* si passa all'analisi dei risultati. 
+```{r}
+autoplot(ts(log(df_Camry_US_sales$sales), start=c(2009, 01), end=c(2022, 11), frequency = 12), series = "Real Path") +
+  autolayer(ts(sales_log_gran_mean_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="GranMean")+
+  autolayer(ts(sales_log_naive_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="Naive")+
+  autolayer(ts(sales_log_HW_point_pred, start=c(2021, 12), end=c(2022, 11), frequency = 12), series="HW")+
+  xlab("Month") + ylab("Sales") +
+  ggtitle("Forecasts Toyota Camry sales") +
+  guides(colour=guide_legend(title="Forecast"))
+```
+Mettendo a confronto i *lineplot* delle predizioni si nota sostanzialmente che il metodo con la *gran mean* tende a sovrastimare i valori di conseguenza sembra essere il peggiore.
+Per quanto riguarda *Naive* e *HW* si nota che quest ultimo, che inizialmente sembra avere un *path* molto vicino a quello reale, poi comincia a sottostimare fortemente i valori. *Naive* invece sembra avere un miglior compromesso di stima.
+
+Per valutare numericamente la bontà delle previsione verrano utilizzate le seguenti statistiche di accuratezza, che verranno poi messe a confronto:
+
+- **ME** (Mean Error): rappresenta la media degli errori del modello. 
+$MAE = (1/N) \sum_{i=1}^{N} \overline{y}_t - y_t$
+
+- **RMSE** (Root Mean Squared Error): rappresenta la radice quadrata della media dei quadrati degli errori del modello. In altre parole, può essere considerato come una sorta di distanza (normalizzata) tra il vettore dei valori previsti e il vettore dei valori osservati.
+$RMSE= \sqrt{(1/N)\sum_{i=1}^{N}(\overline{y}_t - y_t)^2}$
+
+- **MAE** (Mean Absolute Error): rappresenta la media degli errori assoluti del modello. È una metrica semplice e facilmente interpretabile, ma può essere influenzata da valori estremi (*outliers*) nella distribuzione dei dati.
+$MAE = (1/N) \sum_{i=1}^{N} |\overline{y}_t - y_t|$
+
+- **MPE** (Mean Percentage Error): rappresenta la media percentuale degli errori del modello. Poiché nella formula sono utilizzati i valori effettivi invece dei valori assoluti degli errori di previsione, gli errori di previsione positivi e negativi possono compensarsi a vicenda; di conseguenza, la formula può essere utilizzata come misura del *bias* nelle previsioni.
+$MPE= (1/N)(\sum_{i=1}^{N}(y_t-\overline{y}_t)/y_t)  *100$
+
+- **MAPE** (Mean Absolute Percentage Error): rappresenta la media percentuale degli errori assoluti del modello. In altre parole, è la media dei valori assoluti delle differenze percentuali tra le previsioni del modello e i valori effettivi.
+$MAPE = (1/N)(\sum_{i=1}^{N}|y_t-\overline{y}_t|/y_t)*100$
+
+- **MASE**
+
+La statistica *MASE* (Mean Absolute Scaled Error) è una metrica di accuratezza utilizzata per valutare la bontà di un modello di previsione rispetto a una previsione *naive.* La previsione *naive* è un semplice modello di previsione che si basa sulla ripetizione del valore dell'ultima osservazione come previsione per le future osservazioni.
+
+La MASE è definita come il rapporto tra l'errore medio assoluto del modello e l'errore medio assoluto del modello di previsione *naive* In formula:
+
+$MASE =  (MAE_(model)) / (MAE_(naive))$
+
+La *MASE* è una metrica utile perché è indipendente dalle unità di misura della variabile che si sta prevedendo. Inoltre, la MASE è una metrica relativa, ovvero tiene conto dell'errore di previsione del modello rispetto a una previsione naive, che rappresenta un modello di base semplice ma comunque valido.
+
+In generale, un valore di MASE inferiore a 1 indica che il modello di previsione è migliore della previsione naive, mentre un valore di MASE superiore a 1 indica che il modello di previsione è peggiore della previsione naive La MASE può essere utilizzata per confrontare la bontà di diversi modelli di previsione, o per valutare le performance di un modello di previsione rispetto a una previsione naive di riferimento.
+
+**N.B**: la funzione "*accuracy*" della libreria *forecast* effettua il calcolo utilizzando $[y_t-\overline{y}_t]$ invece di $[\overline{y}_t - y_t]$
+
+#### Accuracy del forecast con "*stl*" function
+```{r}
+Camry_BTC_log_stl_point_pred_accuracy <- forecast::accuracy(sales_log_stl_for[["mean"]], sales_log_test) 
+show(Camry_BTC_log_stl_point_pred_accuracy)
+Camry_BTC_log_stl_point_resid <- sales_log_test-sales_log_stl_for[["mean"]]
+Camry_log_stl_point_pred_MASE <- fabletools::MASE(Camry_BTC_log_stl_point_resid, sales_log,
+                                                      demean = FALSE, na.rm = TRUE, .period=12)
+MASE_string <- sprintf("MASE = %f\n", Camry_log_stl_point_pred_MASE)
+cat(MASE_string)
+```
+#### Accuracy del forecast con *naive method*
+```{r}
+Camry_BTC_log_naive_point_pred_accuracy <- forecast::accuracy(sales_log_naive_point_pred, sales_log_test) 
+show(Camry_BTC_log_naive_point_pred_accuracy)
+Camry_BTC_log_naive_point_resid <- sales_log_test-sales_log_naive_point_pred
+Camry_log_naive_point_pred_MASE <- fabletools::MASE(Camry_BTC_log_naive_point_resid, sales_log,
+                                                      demean = FALSE, na.rm = TRUE, .period=12)
+MASE_string <- sprintf("MASE = %f\n", Camry_log_naive_point_pred_MASE)
+cat(MASE_string)
+```
+#### Accuracy del forecast con *HW method*
+```{r}
+Camry_BTC_log_HW_point_pred_accuracy <- forecast::accuracy(sales_log_HW_point_pred, sales_log_test) 
+show(Camry_BTC_log_HW_point_pred_accuracy)
+Camry_BTC_log_HW_point_resid <- sales_log_test-sales_log_HW_point_pred
+Camry_log_HW_point_pred_MASE <- fabletools::MASE(Camry_BTC_log_HW_point_resid, sales_log,
+                                                      demean = FALSE, na.rm = TRUE, .period=12)
+MASE_string <- sprintf("MASE = %f\n", Camry_log_HW_point_pred_MASE)
+cat(MASE_string)
+```
+#### Accuracy del forecast con *Gran mean method*
+```{r}
+Camry_BTC_log_gran_mean_point_pred_accuracy <- forecast::accuracy(sales_log_gran_mean_point_pred, sales_log_test) 
+show(Camry_BTC_log_gran_mean_point_pred_accuracy)
+Camry_BTC_log_gran_mean_point_resid <- sales_log_test-sales_log_gran_mean_point_pred
+Camry_log_gran_mean_point_pred_MASE <- fabletools::MASE(Camry_BTC_log_gran_mean_point_resid, sales_log,
+                                                      demean = FALSE, na.rm = TRUE, .period=12)
+MASE_string <- sprintf("MASE = %f\n", Camry_log_gran_mean_point_pred_MASE)
+cat(MASE_string)
+```
+
+#### Analisi dei valori di accuracy
+
+Dai valori ottenuti si possono effettuare vari confronti:
+
+- I valori della **ME** sono minori di 0 nei casi di *naive* e *gran mean* e maggiore di 0 nel caso di *stl function* e *HW*. Questo sta a indicare che i primi due tendono a sovrastimare i valori, mentre l'ultimo tende a sottostimarli. Essendo il valore di *HW* il più basso in valore assoluto indica che in media questa predizione ha il miglior compromesso tra sovrastima e sottostima.
+- Se si considera la **RMSE** il valore più basso è quello dato dall'utilizzo del metodo *naive*, indicando un miglior precisione di predizione rispetto agli altri modelli (anche se i valori differiscono di poco eccetto *gran mean*).
+- Il valore della **MAE** è nuovamente minore nel caso del modello con *naive* stando a indicare nuovamente una miglior precisione.
+- Per quanto riguarda la **MPE** il valore di *HW* è "il più vicino" a 0.
+- La **MAPE** è anch'essa minore nel caso *naive*.
+- Infine i valori della **MASE** (minori di 1) indicano che, utilizzando per il trend i metodi *naive* e *HW*, oppure la funzione di forecast automatico *stl* si ottengono predizioni migliori rispetto al modello di predizione banale (*naive*) per tutta la Time Series. Nel caso della *Gran Mean* si ottiene una *MASE>1* indicando errori di predizione peggiori di quelli della predizione banale.
+
+Come conclusione generale si può dire che il modello che utilizza il *naive method* per il forecast del trend è il più accurato.
+
+Infine si salvano gli errori derivati sia dal *fitting* dei dati del *Trainset* sia dalla *prediction* dei dati del *Testset* per poter comparare, tramite il test di *Diebold-Mariano*, il modello attuale con quello che si proverà a utilizzare in seguito.
+```{r}
+write.csv(Camry_TrnS_df, "Camry_US_sales_trainset.csv")
+sales_log_naive_point_pred_df = as.data.frame(sales_log_naive_point_pred)
+Camry_BTC_log_naive_point_resid_df = as.data.frame(Camry_BTC_log_naive_point_resid)
+write.csv(sales_log_naive_point_pred_df, "sales_log_stl_point_pred_df")
+write.csv(Camry_BTC_log_naive_point_resid_df, "Camry_BTC_log_stl_point_resid_df.csv")
+```
+
+
+
+
